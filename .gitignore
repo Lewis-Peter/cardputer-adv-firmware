@@ -1,0 +1,51 @@
+# PlatformIO 编译产物 / 依赖库缓存（不进仓库，本地会自动重新拉）
+.pio/
+.pioenvs/
+.piolibdeps/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.o
+
+# 本地 MCP 配置（含个人环境路径/token，别提交）
+.mcp.json
+
+# API key 等私密配置（复制 src/secrets.h.example 改名成 secrets.h，别提交真实 key）
+src/secrets.h
+
+# UI 模拟器的编译产物和渲染出来的截图
+tools/uisim/build/
+tools/uisim/out/
+
+# 电量逻辑测试台的编译产物
+tools/powertest/powertest
+
+# Remote ID 解码测试台的编译产物
+tools/odidtest/odidtest
+tools/odidtest/odid_*
+
+# RAMLOG 表格试跑台的编译产物
+tools/ramtest/ramtest
+
+# Python 字节码
+__pycache__/
+*.pyc
+tools/irtest/irtest
+tools/gnsstest/gnsstest
+tools/clocktest/clocktest
+tools/oventest/oventest
+tools/jsontest/jsontest
+tools/astrotest/astrotest
+
+# 计算器 + 单位换算测试台的编译产物
+tools/calctest/calctest
+tools/loratest/loratest
+
+# Codex CLI 的本地配置，不进仓库
+.codex/
+
+# 临时调试截屏与临时文件
+scratch/

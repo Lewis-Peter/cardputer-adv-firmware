@@ -5,6 +5,7 @@
 #include <lwip/sockets.h>
 #include <cstring>
 #include "ui_common.h"
+#include "config.h"
 #include "sd_files.h"
 
 // =============================================================================
@@ -41,10 +42,10 @@ static Probe PROBES[] = {
   {"DNS baidu.com",      PT_DNS,  "www.baidu.com",   0,   nullptr},
   {"TCP real-goog:443",  PT_TCP,  "142.251.152.4",   443, nullptr},   // 真实Google IP，测路由级封锁
   {"TCP real-goog:80",   PT_TCP,  "142.251.152.4",   80,  nullptr},   // 同一目标只换端口——隔离"端口"这一个变量
-  {"TCP aliyun:443",     PT_TCP,  "223.5.5.5",       443, nullptr},   // 基线：应该总是通
+  {"TCP " CFG_PROBE_BASELINE_NAME ":443", PT_TCP, CFG_PROBE_BASELINE_IP, 443, nullptr},   // 基线：应该总是通
   {"TCP cloudflare:443", PT_TCP,  "1.1.1.1",         443, nullptr},   // Cloudflare 443
   {"TCP cloudflare:80",  PT_TCP,  "1.1.1.1",         80,  nullptr},   // Cloudflare 80
-  {"TCP vpn-node",       PT_TCP,  "203.0.113.10"  ,   443, nullptr},   // 默认值，loadVpnCfg() 会用NVS覆盖
+  {"TCP vpn-node",       PT_TCP,  CFG_PROBE_VPN_HOST, CFG_PROBE_VPN_PORT, nullptr},   // 默认值，loadVpnCfg() 会用NVS覆盖
   {"HTTP gstatic 204",   PT_HTTP, "www.gstatic.com", 80,  "/generate_204"},  // 抓门户跳转
 };
 static const int PROBE_COUNT = sizeof(PROBES) / sizeof(PROBES[0]);

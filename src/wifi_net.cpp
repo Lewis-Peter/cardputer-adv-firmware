@@ -5,15 +5,16 @@
 #include <ctime>
 #include "icons.h"
 #include "ui_common.h"
+#include "config.h"
 #include "hotspot.h"
 #include "ram_profile.h"
 #include "gbk_table.h"
 #include "geoloc.h"
 #include "keyboard_adv.h"
 
-static const char* NTP_1 = "ntp.aliyun.com";
-static const char* NTP_2 = "cn.pool.ntp.org";
-static const char* NTP_3 = "pool.ntp.org";
+static const char* NTP_1 = CFG_NTP_1;
+static const char* NTP_2 = CFG_NTP_2;
+static const char* NTP_3 = CFG_NTP_3;
 static const uint32_t NTP_RESYNC_MS = 6UL * 60UL * 60UL * 1000UL;   // 6 hours
 static uint32_t lastNtpSyncMs = 0;
 static uint32_t lastNtpAttemptMs = 0;

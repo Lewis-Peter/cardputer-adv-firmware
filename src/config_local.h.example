@@ -1,0 +1,11 @@
+// 复制为 src/config_local.h，只保留想覆盖的项。可用宏见 config.h。
+#pragma once
+// #define CFG_NTP_1 "time.cloudflare.com"
+// #define CFG_NTP_2 "time.google.com"
+// #define CFG_NTP_3 "pool.ntp.org"
+// #define CFG_HOTSPOT_SSID "MyCardputer"
+// #define CFG_HOTSPOT_DEFAULT_PW "change-me-please"
+// #define CFG_PROBE_VPN_HOST "your.server.example"
+// #define CFG_PROBE_VPN_PORT 443
+// #define CFG_PROBE_BASELINE_IP "9.9.9.9"
+// #define CFG_PROBE_BASELINE_NAME "quad9"

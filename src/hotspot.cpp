@@ -3,9 +3,10 @@
 #include <esp_wifi.h>
 #include "dhcpserver/dhcpserver.h"   // dhcp_search_ip_on_mac：按 MAC 查 DHCP 租约表拿到分配的 IP
 #include "ui_common.h"
+#include "config.h"
 
-static const char* HOTSPOT_SSID = "Cardputer-ADV";
-static const char* DEFAULT_PW = "cardputer123";
+static const char* HOTSPOT_SSID = CFG_HOTSPOT_SSID;
+static const char* DEFAULT_PW = CFG_HOTSPOT_DEFAULT_PW;
 
 struct HotspotClient {
   uint8_t mac[6];

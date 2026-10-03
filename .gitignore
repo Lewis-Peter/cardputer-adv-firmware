@@ -49,3 +49,6 @@ tools/loratest/loratest
 
 # 临时调试截屏与临时文件
 scratch/
+
+# 本地编译期配置覆盖（见 src/config.h）
+src/config_local.h

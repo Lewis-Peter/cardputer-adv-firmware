@@ -1,248 +1,200 @@
-# 用串口把 30 个 app 跑一遍
+**English** | [简体中文](serial-sweep.zh-CN.md)
 
-    HELP 里那句"单字符 -> 原样当按键喂给UI"意味着整台机器可以从电脑上驱动。
-    配上 STAT 和 SHOT，就能做一件手动做不了的事：**逐个进出每个 app，记录堆余量，
-    自动截图**——一轮 7 分钟，人工点 30 个 app 再抄数字要半小时且必然抄错。
+# Sweeping All 30 Apps via Serial
 
-这篇记录怎么做，以及第一次做就抓到的那个坑。
+    The help string "single char -> fed to UI as keypress" implies the entire device can be driven
+    programmatically from a host PC. Combined with STAT and SHOT, this enables an otherwise tedious manual task:
+    **cycling through every app, recording heap margins, and capturing screenshots automatically**—a single sweep
+    takes ~7 minutes, whereas clicking through 30 apps manually and transcribing numbers takes half an hour with guaranteed errors.
+
+This document details the workflow and pitfalls caught during the initial audit.
 
 ---
 
-## 能用的原语
+## Available Primitives
 
-| 发什么 | 效果 | 有无回显 |
+| Command Sent | Effect | Echo Output |
 |---|---|---|
-| `ENTER` / `BACK` / `UP` / `DOWN` | 导航键别名 | ✅ `[remote] cmd="..." -> screen=N` |
-| `MENU` | 回主菜单（**会走 cleanupApp**，见下） | ✅ |
-| `/` `,` `;` `.` | 单字符直接当按键喂进去（右/左/上/下） | ❌ **静默** |
+| `ENTER` / `BACK` / `UP` / `DOWN` | Navigation key aliases | ✅ `[remote] cmd="..." -> screen=N` |
+| `MENU` | Return to main menu (**triggers cleanupApp**, see below) | ✅ |
+| `/` `,` `;` `.` | Single characters fed directly as keys (Right/Left/Up/Down) | ❌ **Silent** |
 | `STAT` | `screenOff=` / `idle=` / `sleepAt=` / `heap=` / `largest=` / `minEver=` / `screen=` | ✅ |
-| `SHOT` | RGB565 逐行 hex，约 1.3 秒 | ✅ |
-| `GOTO n` | 裸跳转，**不 cleanup**，enter() 只对取数类页面调 | ✅ 另有 `[jump]` 提醒 |
+| `SHOT` | RGB565 per-line hex dump (~1.3 seconds) | ✅ |
+| `GOTO n` | Raw jump, **no cleanup**, `enter()` called only for network fetch pages | ✅ Annotates `[jump]` warning |
 
-两个容易踩的：
+Common pitfalls:
 
-- **别用 `\n` 当 ENTER。** 脚本里习惯写 `write(b'\n')`，但串口协议是按行解析的，
-  发一个裸换行等于发了个空行，被直接忽略。用 `ENTER` 别名。
-- **单字符命令不回显，但确实生效。** 一开始以为 `/` 没用，实际是它成功了只是没回话。
-  要确认位置就 `ENTER` 进去看 `screen=` 落在哪。
+- **Do not send `\n` to emulate ENTER.** In automation scripts, developers often write `write(b'\n')`. The serial parser operates line-by-line; an isolated newline is treated as an empty line and discarded. Use the `ENTER` command alias.
+- **Single-character commands produce no echo, but execute reliably.** Lack of terminal response initially looks like an ignored key; verify navigation by issuing `ENTER` and inspecting `screen=`.
+- **⚠️ Never assume starting position.**
+  The menu index `menuIndex` **persists across navigations**: `MENU` merely resets `screen` to the main menu without altering the selection index. Reissuing `ENTER` enters whichever app was selected previously. Scripts assuming "count N steps from 0" will drift, giving the false impression of lost keystrokes. **Always verify current position via `screen=`, or navigate deterministically using `GOTO n`.**
+- **⚠️ There is no left boundary wall.** `menuMove()` wraps across category boundaries, and moving left from group 0 wraps directly to the last group—the menu is completely **circular**. The assumption of "pressing left 40 times hits index 0" is invalid; 40 left presses evaluates to `(start - 40) mod 31`. To navigate reliably, read `menu=` via `STAT` and calculate: `steps = (target - current) % APP_COUNT`.
+- **`STAT` now reports menu indices**: `menu=18/31 (Map) group=SIGNAL`. Before this telemetry was added, assuming starting at index 0 caused severe measurement errors.
+- **Keystroke transmission cadence: Zero loss at ≥0.08s intervals.** Benchmarked by issuing 10 page turns across the 5 Weather pages (two full cycles) and 30 consecutive right-arrow keys across the main menu:
 
-- **⚠️ 永远不要假设起点在哪。** 这是最容易栽的一条，我 2026-08-26 连着栽了三次。
-  菜单索引 `menuIndex` 是**跨进出保留**的：`MENU` 只把 `screen` 拨回主菜单，不动索引；
-  上一轮停在哪个 app，下一轮 `ENTER` 就还进哪个。于是"从 0 数 N 格"这种脚本必然错位，
-  而错位的表现是"按键好像被丢了"——我据此得出过"连发会大量丢键"的结论，**那是错的**
-  （见下一条实测）。**每一步都从 `screen=` 反推位置，或者干脆用 `GOTO n` 定位。**
-
-- **⚠️ 没有"最左"这堵墙。** `menuMove()` 走到组边界会绕到相邻组，第一组再往左直接回到
-  最后一组——整个菜单是**环形**的。"连按 40 次左键撞到索引 0"这个想当然的做法永远不成立，
-  40 次左键的结果是 `(起点 - 40) mod 31`。要定位就读 `STAT` 的 `menu=` 再算差值：
-  `steps = (目标 - 当前) % APP_COUNT`。
-
-- **`STAT` 现在会报菜单索引**：`menu=18/31 (Map) group=SIGNAL`。加这一行之前，
-  "我以为我在索引 0" 让我在同一个坑里栽了三次，还据此得出过"连发会大量丢键"的错误结论
-  （见下）。
-
-- **连发速度：≥0.08s 一个不丢。** 实测（Weather 五页链连发 10 次翻页应绕两圈回原页 /
-  主菜单连发 30 次右键应绕一整圈回原处）：
-
-  | 间隔 | 结果 |
+  | Interval | Result |
   |---|---|
-  | 0.05s | 两轮里有一轮丢 |
-  | 0.08s ~ 0.50s | **一个不丢**（菜单和页链都试过） |
+  | 0.05s | Lost keys in 1 of 2 runs |
+  | 0.08s ~ 0.50s | **Zero key loss** (verified across menus and page chains) |
 
-  所以 0.1s 是安全的节奏，没必要放到 0.3s 以上。注意主菜单有高亮框缓动动画、
-  每帧都在重绘，但实测并不影响收键。
-
-  **补记（2026-08-26）**：`STAT` 能报菜单索引之后重测，结论更干脆——**一个键都没丢过**。
-  三轮各发 10 次右键，起点 22/23/24，落点 1/2/3，`(22+10) mod 31 = 1` 逐个吻合。
-  之前所有"丢键"的观感，全部来自上面那两条（不知道起点 + 以为有墙）。
-
-## 关键区别：`GOTO n` 不等于真的进 app
-
-`GOTO` 只改 `screen` 变量让渲染跑起来。后来给取数类页面（ADS-B / Sats / Router /
-GitHub / Weather / LAN Scan / Typhoon / Files）补了 `enter()`——它们进入时要拉网络，
-不调就测不出真实的进入行为。**会抢硬件的那些（LoRa 占 SPI、Spectrum 开 Mic、
-BLE/Ducky 起协议栈）依旧不调**，免得一条调试指令把外设状态搅乱。所以：
-
-- 想**看布局** → `GOTO` 就够了，快
-- 想测**内存/初始化行为** → 除了上面那几页，其余必须走 `ENTER`，否则重分配根本没发生
-
-用 `GOTO` 测出来的"堆没变化"是假象。第一次做这轮巡检就是栽在这，白跑了一遍。
+  0.1s is a safe cadence; intervals above 0.3s are unnecessary. Note that the main menu redraws every frame with selector easing animations, but this does not drop incoming serial keys.
+  Re-testing with menu index reporting confirmed that across three rounds of 10 right keys (starting at 22/23/24, ending at 1/2/3), `(22+10) mod 31 = 1` matched precisely without dropping a single key.
 
 ---
 
-## 抓到的坑：`MENU` 曾经会搁浅内存
+## Key Distinction: `GOTO n` Does Not Truly Enter the App
 
-**现象。** 巡检脚本每轮结尾都发 `BACK` 再发 `MENU` 保证回到菜单，结果堆一路往下掉，
-30 个 app 跑完净损 7.5KB，看着像好几个 app 在漏。
+`GOTO` updates the `screen` variable to trigger rendering. While `enter()` was retrofitted for network-fetching views (ADS-B / Sats / Router / GitHub / Weather / LAN Scan / Typhoon / Files) to exercise network allocation behavior, **hardware-exclusive subsystems (LoRa claiming SPI, Spectrum enabling mic, BLE/Ducky starting stacks) intentionally skip `enter()`** to prevent debug commands from disrupting peripheral states. Therefore:
 
-**排查。** 反复进出同一个 app 六次，Δ 全是 0——不是泄漏。真正的差别在退出路径：
+- To **inspect UI layouts** → `GOTO` is fast and sufficient.
+- To **audit memory and lifecycle behavior** → All views (except the network fetch pages noted above) must be entered via `ENTER`, otherwise dynamic allocations never execute.
 
-```
-方式 A：BACK 一次 + MENU 跳走   →  回收 0 字节
-方式 B：BACK 两次（正常退出）    →  回收 48,500 字节
-```
-
-**根因。** 地图是 GNSS 的**子页**，子页按 `` ` `` 只回到第 1 页（`main.cpp` 的多子页翻页
-逻辑），要再按一次才触发 `cleanupApp(SCREEN_GNSS)`。而 `MENU` 当时是裸的
-`screen = SCREEN_MENU`，直接绕过了 `cleanupApp()`，把那 48KB 底图缓存搁浅到重启。
-
-**已修**（`serial_cmd.cpp`）：`MENU` 现在先调 `cleanupApp(screen)`。理由是 HELP 把
-`MENU` 归在"导航键别名"这一组，和 `ENTER`/`BACK` 并列，语义是模拟用户回菜单，
-就该和按 `` ` `` 一样清理；真想要不清理的裸跳转，`GOTO` 的语义本来就是"仅供看 UI"。
-
-修复后两条路径都回收 48,500，`largest` 也完整回到 61,428。
-
-**`GOTO` / `GNSSMAP` 保持不清理，但会吼一声。** 这个逃生口是有用的——正在 LoRa 抓包或
-BLE 扫描时想跳去看一眼别的页面，清理会把采集直接掐断。但"不清理"和"悄悄不清理"是两回事：
-现在每次裸跳转都往串口打一行
-
-```
-[jump] 裸跳转，不 cleanup：离开 screen=28。若它占着资源（地图 48KB / LoRa SPI /
-       BLE 协议栈）会搁浅到重启；要正常退出请用 MENU 或 BACK
-```
-
-巡检脚本里看到这行就知道后面的堆读数不能信。⚠️ **量内存的那一轮不要用 `GOTO`**，
-用 `ENTER`/`BACK`/`MENU`——理由跟上面"`GOTO` 测出来的堆没变化是假象"是同一条。
-
-> 这个坑的讽刺之处：`MENU` 是个调试指令，而它污染的恰好是调试者最想量的那个指标。
+Heap deltas measured via `GOTO` giving "zero memory change" are illusions.
 
 ---
 
-## 顺带量到的：碎片化比总量更早成为瓶颈
+## Pitfall Caught: `MENU` Previously Stranded Heap Memory
 
-跑完一轮 app 之后：
+**Symptom.** An audit script issuing `BACK` followed by `MENU` at each step observed heap steadily dropping by 7.5KB across 30 apps, falsely suggesting multiple leaks.
+
+**Investigation.** Cycling in and out of a single app six times yielded Δ = 0—proving no leak existed. The variance lay entirely in the exit path:
 
 ```
-heap    72,648 → 66,336     掉 8.7%
-largest 61,428 → 24,564     掉 60%
+Path A: Single BACK + jump via MENU   →  0 bytes reclaimed
+Path B: Two BACK presses (normal exit) →  48,500 bytes reclaimed
 ```
 
-**总堆几乎没少，最大连续块掉了六成。** 这对本项目是有直接后果的，因为地图底图要
-48KB **连续**内存：
+**Root cause.** Map is a **subpage** of GNSS; pressing `` ` `` on a subpage returns to page 1 (subpage carousel logic in `main.cpp`). A second press is required to invoke `cleanupApp(SCREEN_GNSS)`. Previously, `MENU` performed a raw assignment `screen = SCREEN_MENU`, bypassing `cleanupApp()` and stranding the 48KB base map buffer until reboot.
 
-| 状态 | 进入前 largest | 地图实际分配 | 落到哪一档 |
+**Fix** (`serial_cmd.cpp`): `MENU` now invokes `cleanupApp(screen)` prior to transitioning. `MENU` is classified as a navigation alias alongside `ENTER`/`BACK`; simulating a user returning to the menu should mirror pressing `` ` ``. For raw jumps without cleanup, `GOTO` remains the designated primitive.
+
+Following the fix, both pathways reclaim 48,500 bytes, returning `largest` to 61,428.
+
+**`GOTO` and `GNSSMAP` remain uncleaned, but emit warnings.** This escape hatch is useful—inspecting other pages during LoRa packet sniffing or BLE scanning without aborting capture sessions. However, silent omissions are hazardous: raw jumps now output an explicit warning:
+
+```
+[jump] Raw jump without cleanup: leaving screen=28. Held resources (48KB map / LoRa SPI /
+       BLE stack) remain allocated until reboot; use MENU or BACK for clean exit.
+```
+
+When auditing memory, discard readings following this warning. ⚠️ **Do not use `GOTO` during memory profiling runs**; navigate using `ENTER`/`BACK`/`MENU`.
+
+---
+
+## Incidental Finding: Fragmentation Becomes the Bottleneck Before Total Free Heap
+
+After a complete traversal across all apps:
+
+```
+heap    72,648 → 66,336     Down 8.7%
+largest 61,428 → 24,564     Down 60%
+```
+
+**Total heap dropped marginally, while the largest contiguous block collapsed by 60%.** This directly impacts the system because the GNSS map requires 48KB of **contiguous** memory:
+
+| State | `largest` Before Entry | Map Buffer Allocation | Fallback Tier |
 |---|---|---|---|
-| 刚开机 | 61,428 | **48,500** | 全彩 16bpp |
-| 跑过一轮 app | 24,564 | **24,260** | 8bpp 退档 |
+| Fresh Boot | 61,428 | **48,500** | Full Color 16bpp |
+| After App Sweep | 24,564 | **24,260** | 8bpp Reduced Color |
 
-也就是说 `gnss.cpp` 里那段"48KB 拿不到就退 24KB"的兜底**不是理论上的谨慎，是日常会走到的路径**。
-`STAT` 里 `largest` 这个字段比 `heap` 更值得盯。
+The fallback in `gnss.cpp` ("drop from 48KB to 24KB when unavailable") is not mere defensive programming—it is an actively traversed production path. `largest` in `STAT` is a far more critical health metric than total `heap`.
 
 ---
 
-## 结论：没有内存泄漏
+## Conclusion: No Memory Leaks
 
-修掉 `MENU` 那个坑之后，对五个 app 各做了 4~6 轮连续进出：
+Following the `MENU` fix, 5 apps were subjected to 4–6 consecutive entry/exit cycles:
 
-| app | 轮数 | 每轮 Δ |
+| App | Rounds | Delta per Round |
 |---|---|---|
-| LAN Scan | 6 | 全 0 |
-| NetProbe | 6 | 全 0 |
-| Weather | 6 | 全 0 |
-| Player | 4 | 全 0 |
-| Bluetooth | 4 | 全 0 |
+| LAN Scan | 6 | All 0 |
+| NetProbe | 6 | All 0 |
+| Weather | 6 | All 0 |
+| Player | 4 | All 0 |
+| Bluetooth | 4 | All 0 |
 
-**一个都不漏。** 首轮看到的下降全是**一次性常驻分配**，第二轮开始就复用了。
+**Zero leaks.** Reductions observed on first entry represent **one-time permanent allocations** reused across all subsequent launches.
 
-唯一一笔真的还不回来的是 **BLE 首次启用的约 14KB**：Ducky/Bluetooth 第一次进去分配
-41,384，退出只还 27,244。但连续进出 4 次 Δ 全为 0，说明这是 ESP32 的平台行为——
-BT 控制器内存一旦 init 就无法完整释放，不是本项目的问题。**代价只付一次。**
+The only genuinely unrecoverable allocation is **~14KB upon initial BLE initialization**: launching Ducky/Bluetooth allocates 41,384 bytes, while exit recovers only 27,244 bytes. However, subsequent cycles show Δ = 0. This is standard ESP32 platform behavior—the hardware BT controller cannot be fully unloaded once initialized. **The cost is incurred only once.**
 
 ---
 
-## 菜单导航是环形的，别想用"左移 35 次"归零
+## Menu Navigation is Circular: Never Assume "35 Left Keys" Resets to Zero
 
-一开始想用"狂按左键回到 index 0"当每轮的起点，结果标签整体偏了 25 格，
-把本该跳过的 Ducky 也进了一遍（还好它只列 SD 上的脚本等你选，没有执行 payload）。
+Initial attempts to reset to index 0 by issuing repeated left-arrow commands shifted selections by 25 positions, inadvertently entering Ducky (which safely paused at script selection without executing payloads).
 
-原因：`menuMove` 左右**走出边界会切到相邻组**，整体是环的，按 35 次左等于净退
-`35 mod 30 = 5` 格，不是归零。
+Reason: `menuMove` wraps across categories at group boundaries; issuing 35 left keys evaluates to a net shift of `35 mod 30 = 5`, not index 0.
 
-可靠的办法是**标定**——先 `ENTER` 一次读回 `screen`，反查出当前 app index，再精确移动：
+The reliable approach is **calibration**—enter once, read `screen`, look up the current index in a reverse map, and step deterministically:
 
 ```python
 send('MENU'); send('ENTER'); sleep(2)
-cur = BACKMAP[stat().screen]          # screen -> app index 的反查表
+cur = BACKMAP[stat().screen]          # screen -> app index reverse mapping
 send('BACK'); send('MENU')
 for _ in range((TARGET - cur) % 30): send('/')
 ```
 
-反查表可以从一次巡检的输出里直接生成（"落到的 screen"那列就是）。
-
-顺带：**`STAT` 的 `screen=` 是唯一可信的位置信息**。脚本里自己数的 index 会因为丢键
-和环形边界漂移，每轮都拿 `screen` 复核一遍，比事后对着截图猜省事得多。
+`screen=` in `STAT` is the sole trustworthy ground truth. Keystroke-based index counters drift across wrapped boundaries; validating against `screen` on each round eliminates ambiguity.
 
 ---
 
-## 复现
+## Reproduction
 
-脚本没进仓库（一次性的），核心就这几步：
+The core automation loop executes as follows:
 
 ```python
-send('MENU'); [send(',') for _ in range(35)]        # 退到 index 0
+send('MENU'); [send(',') for _ in range(35)]        # Step back to index 0
 for i, name in enumerate(APPS):
     h0 = stat().heap
     send('ENTER'); sleep(2.0)
-    scr = stat().screen                              # 验证真的进去了
+    scr = stat().screen                              # Verify successful entry
     shot(f'{i:02d}_{name}.png')
     send('BACK'); send('MENU')
     h1 = stat().heap
     print(name, h1 - h0)
-    send('/')                                        # 下一个
+    send('/')                                        # Next app
 ```
 
-要注意的：
+Key considerations:
 
-- **跳过 Ducky**（menu index 25）。它是 USB HID，进去会往开发机上敲键盘。
-- 抢射频的几个（Sniffer / Wardrive / Hotspot / LAN Scan）会断 WiFi，退出后
-  `loop()` 的看门狗会拉回来，但相邻几个 app 的堆读数会被重连过程带偏，看数字时留意。
-- `ENTER` 之后至少等 2 秒再读 `STAT`，有些 app 的分配是异步的——地图那 48KB 要等瓦片
-  开始加载才申请，等 6 秒都可能读到"分配了 0 字节"的假象。
+- **Skip USB Ducky** (menu index 25): As a USB HID device, it injects keystrokes into the connected development workstation.
+- RF-intensive apps (Sniffer / Wardrive / Hotspot / LAN Scan) disconnect Wi-Fi. The watchdog in `loop()` reconnects upon exit, but transient reconnection buffers temporarily skew heap readings of adjacent apps.
+- Wait at least 2.0 seconds after `ENTER` before sampling `STAT`; some allocations are asynchronous (e.g. 48KB map allocations begin only when tile streaming starts).
 
 ---
 
-## 熄屏、按键、以及"观测行为把现象弄没了"
+## Screen Sleep, Keypresses, and "Observation Erasing the Phenomenon"
 
-### 结论先写
+### Summary Up Front
 
-- **物理按键**：熄屏时第一下只负责唤醒，**会被吞掉**（`handleKey()` 开头就 return）。
-- **串口指令**：**不会被吞**。`handleSerialCmd()` 在分发之前先自己唤醒了
-  （`serial_cmd.cpp`，理由是"串口指令是主动发出的，不存在不小心碰到这回事"）。
-  所以巡检脚本**不需要**为熄屏预留一个空按键。
-- 熄屏时长默认 30 秒（`sleepOptIdx = 2`），**不存 NVS**，重启就回到 30 秒。
+- **Physical Keypresses**: When the screen is asleep, the first keystroke wakes the display and **is consumed** (handled via early return in `handleKey()`).
+- **Serial Commands**: **Not consumed**. `handleSerialCmd()` actively wakes the display before dispatching commands (`serial_cmd.cpp`, rationale: serial commands are deliberate remote instructions). Automation scripts do not need to send dummy wake-up keystrokes.
+- Display sleep timeout defaults to 30 seconds (`sleepOptIdx = 2`), **not persisted to NVS**, returning to 30 seconds upon reboot.
 
-### 但 2026-08-26 我在这上面绕了半天，值得记下来
+### Debugging Record & Field Lessons
 
-一开始怀疑"连发丢键"是熄屏吃的。为了验证，给 `STAT` 加了 `screenOff` 输出，然后
-静置 53 秒去读——结果是 `screenOff=0`，看起来自动熄屏根本没生效。反复测、硬复位、
-排除 G0 误触发和串口噪声，全都指向"熄屏是坏的"。
+During investigation, intermittent keystroke loss was initially suspected to be caused by screen sleep consumption. Telemetry was added to output `screenOff` in `STAT`. After leaving the device idle for 53 seconds, queries returned `screenOff=0`, suggesting sleep had failed. Repeated resets and noise checks consistently pointed to sleep failure.
 
-**真相是：`STAT` 自己会把屏唤醒**，而唤醒发生在打印之前。所以那个字段**永远只能读到 0**。
-观测行为摧毁了被观测的现象——跟查 BLE 卡死时"加了串口插桩故障就消失"是同一类问题
-（见 [ble-teardown.md](ble-teardown.md) 的教训一）。
+**Root cause: `STAT` itself woke the display before printing.** Consequently, the field always read 0. The observation mechanism altered the observed phenomenon—identical to how adding I/O logging masked the BLE teardown hang (see Lesson 1 in [ble-teardown.md](ble-teardown.md)).
 
-真正拆穿它的是一个**外部观察**：人看着屏幕是黑的，而 `STAT` 说没熄屏。两者矛盾，
-说明矛盾在测量手段上，不在被测对象上。
+An external observation resolved the contradiction: the physical LCD was visibly dark, yet `STAT` reported active. The contradiction pointed to the measurement tool rather than the firmware state.
 
-顺带挖出一个真 bug：那条串口唤醒**没有刷新 `lastActivityMs`**，于是唤醒撑不过一帧
-——下一轮 `loop()` 立刻又满足熄屏条件，屏幕只亮约 20ms 就灭回去。表现就是
-"发了指令屏幕还是黑的"，而那段唤醒代码看着明明执行了。已修（顺手补上 `lastActivityMs`）。
+This also surfaced a genuine bug: serial wakeups **failed to update `lastActivityMs`**, causing wakeups to expire within a single frame—the next iteration of `loop()` immediately satisfied sleep criteria, extinguishing the display after ~20ms. This was corrected by refreshing `lastActivityMs`.
 
-### 现在怎么看这个状态
+### How to Inspect This State Now
 
-`STAT` 报的是 **`screenOffOnArrival`**——"这条指令到达时屏是不是灭的"，是唤醒之前拍的快照。
-直接报 `screenOff` 是没有意义的，那是个被自己的观测抹平的量。
+`STAT` now reports **`screenOffOnArrival`**—capturing whether the display was dark at the exact moment the command arrived, prior to waking:
 
 ```
 [stat] screenOffOnArrival=1 idle=0s sleepAt=30s
 ```
 
-验证（每条之间只隔 1 秒）：
+Verification (commands spaced 1 second apart):
 
-| 时机 | 到达时熄屏 | idle |
+| Timing | `screenOffOnArrival` | `idle` |
 |---|---|---|
-| 刚按过键 | 0 | 0s |
-| 干等 35 秒后的第一条指令 | **1** | 0s |
-| 紧接着的第二条 | 0 | 1s |
+| Immediately after keypress | 0 | 0s |
+| First command after 35s idle | **1** | 0s |
+| Immediately following command | 0 | 1s |
 
-第三行是唤醒修好的证据：修之前它会是 `1`，因为上一条指令唤醒之后屏又立刻灭了回去。
+Line 3 confirms the wake bug fix: prior to the fix, line 3 would read `1` because the screen extinguished immediately after waking.

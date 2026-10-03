@@ -1,108 +1,92 @@
-# 依赖版本锁定（2026-09-24）
+**English** | [简体中文](dependency-pins.zh-CN.md)
 
-    结论先放这儿：**平台、Arduino core 和所有库都钉死在精确版本上**，
-    升级任何一个都要按文末的步骤单独做、单独测。
-    起因是同一份代码在服务器上全新构建，Flash 从 43.7% 涨到 48.5%、RAM 多了 6KB，
-    而代码一行没改——只是 `^3.7` 这种版本范围解析到了更新的库。
+# Dependency Version Pinning (2026-09-24)
+
+    Summary up front: **The platform, Arduino core, and all libraries are strictly pinned to exact versions**.
+    Any upgrade must be performed and tested individually following the procedure at the end of this document.
+    This policy was instituted when a fresh build on a clean server saw Flash usage jump from 43.7% to 48.5%
+    and static RAM increase by 6KB without changing a single line of code—simply because version ranges like
+    `^3.7` resolved to newer library releases.
 
 ---
 
-## 当前锁定的版本
+## Currently Pinned Versions
 
-| 依赖 | 版本 | 备注 |
+| Dependency | Version | Notes |
 |---|---|---|
 | platform `espressif32` | 7.0.1 | |
 | `framework-arduinoespressif32` | 3.20017.241212 | Arduino 2.0.17 / ESP-IDF 4.4.7 |
-| M5Unified | 0.2.20 | 升级见下文，必须和 M5GFX 一起动 |
-| M5GFX | 0.2.27 | M5Unified 只声明了范围，不单独钉会被拉到新版 |
-| FastLED | 3.10.3 | **不要升**，见下文 |
+| M5Unified | 0.2.20 | See upgrade notes below; must move together with M5GFX |
+| M5GFX | 0.2.27 | M5Unified declares an open range; without pinning, newer versions get pulled |
+| FastLED | 3.10.3 | **Do not upgrade**; see details below |
 | ArduinoJson | 7.4.3 | |
 | RadioLib | 7.7.1 | |
 | TinyGPSPlus | 1.1.0 | |
 | LibSSH-ESP32 | 5.9.0 | |
-| ESP8266Audio | 1.9.9（git tag） | 更新的版本要 IDF5，本工程是 IDF4，编不过 |
+| ESP8266Audio | 1.9.9 (git tag) | Newer releases require ESP-IDF 5; this project uses IDF 4 and will fail to compile |
 
 ---
 
-## 为什么不"越新越好"
+## Why "Newer is Not Always Better"
 
-这块板子没有 PSRAM，全屏画布常驻 64.8KB，TLS 握手、GNSS 地图这些功能本来就是
-"刚好够用"。库一升，静态 RAM 多几 KB，这些功能就可能从偶尔失败变成总是失败，
-而且现象跟库版本八竿子打不着，很难查。
+This board lacks PSRAM, and the 64.8KB full-screen canvas resides permanently in internal RAM. Features like TLS handshakes and GNSS mapping already operate near available memory thresholds. When dependencies update, an increase of just a few kilobytes in static RAM can turn occasional edge-case failures into permanent out-of-memory crashes—often manifesting with symptoms completely detached from the upgraded library, making root cause analysis difficult.
 
-另外，本工程在好几处依赖库的**具体行为**：ES8311 寄存器直接写（频谱页的爆音抑制）、
-GPIO38 同时是背光和 LED 电源（`led.cpp`）、麦克风/喇叭反复切换。库里这些地方一改，
-编译照样通过，上机才发现不对。
+Furthermore, several firmware subsystems rely on **specific driver behaviors**: direct register writes to the ES8311 (pop suppression on the spectrum page), GPIO38 serving dual roles for LCD backlight and RGB LED power (`led.cpp`), and frequent dynamic transitions between microphone and speaker. Internal modifications in upstream libraries can compile cleanly yet fail subtly at runtime on physical hardware.
 
-不锁版本还有一个问题：本机、服务器、别的机器各自编出来的固件不一样，出了问题分不清
-是代码改动还是库版本造成的。
+Unpinned versions also introduce cross-environment inconsistency: builds produced locally, in CI, or across different workstations differ, obscuring whether an issue stems from code changes or shifting library dependencies.
 
 ---
 
-## 实测：升级每个库的代价
+## Benchmark: The Cost of Upgrading Each Library
 
-在临时 worktree 里每次只升一个库、其余保持锁定版本，`pio run` 的结果：
+Measured via `pio run` in an isolated test environment, upgrading each library individually while keeping all others pinned:
 
-| 组合 | RAM（字节） | Flash（字节） | 相对基线 |
+| Configuration | RAM (bytes) | Flash (bytes) | Delta vs Baseline |
 |---|---|---|---|
-| 基线（当前锁定版本） | 110,980 | 3,631,405 | — |
-| 只升 M5GFX → 0.2.30 | 110,972 | 3,638,853 | Flash +7.4KB |
-| 只升 M5Unified → 0.2.23 | — | — | 编译失败：要求 M5GFX ≥ 0.2.30 |
-| M5Unified 0.2.23 + M5GFX 0.2.30 | 111,108 | 3,644,389 | RAM +128B，Flash +13KB |
-| 只升 FastLED → 3.10.5 | 117,308 | 4,006,213 | **RAM +6.3KB，Flash +375KB** |
-| 全部升级 | 117,444 | 4,019,265 | RAM +6.5KB，Flash +388KB |
+| Baseline (current pinned versions) | 110,980 | 3,631,405 | — |
+| Only M5GFX → 0.2.30 | 110,972 | 3,638,853 | Flash +7.4KB |
+| Only M5Unified → 0.2.23 | — | — | Build failed: requires M5GFX ≥ 0.2.30 |
+| M5Unified 0.2.23 + M5GFX 0.2.30 | 111,108 | 3,644,389 | RAM +128B, Flash +13KB |
+| Only FastLED → 3.10.5 | 117,308 | 4,006,213 | **RAM +6.3KB, Flash +375KB** |
+| Upgrade all dependencies | 117,444 | 4,019,265 | RAM +6.5KB, Flash +388KB |
 
-### FastLED 3.10.5：不升
+### FastLED 3.10.5: Do Not Upgrade
 
-- 新加的音频/FFT 编译单元 `fl.audio+.cpp.o`（本工程用不上）引用了 `std::ios_base::Init`，
-  链接器把 libstdc++ 的整套 iostream/locale 都拉了进来（`std::locale::_Impl`、
-  `time_get`/`money_get`/`num_get`、宽字符格式化等）。增量里 `.flash.rodata` +227KB、
-  `.flash.text` +147KB、`.dram0.bss` +6KB、IRAM +1KB。
-- 驱动方式也变了：3.10.3 在 GPIO21 上用的是 RMT 硬件（`ClocklessController<21, SK6812>`），
-  3.10.5 在这套 IDF4 core 上退回 `ClocklessBlockingGeneric`，由 CPU 阻塞翻转引脚。
-  LED 灯效模式每 30ms 刷一次，会跟 I2S、WiFi 抢时间。
-- 更新内容里没有对单颗 SK6812 有用的：3.10.4 的发布说明原话是
-  "No FastLED source code changes"，3.10.5 的 122 个提交基本是 LPC/RP2040/C2、容器、测试和 CI。
+- Newly added audio/FFT compilation units (`fl.audio+.cpp.o`, unused by this project) introduce references to `std::ios_base::Init`. The linker pulls in libstdc++'s complete iostream and locale machinery (`std::locale::_Impl`, `time_get`/`money_get`/`num_get`, wide character formatting, etc.). Memory impact: `.flash.rodata` +227KB, `.flash.text` +147KB, `.dram0.bss` +6KB, IRAM +1KB.
+- Driver architecture changed: 3.10.3 uses RMT hardware for GPIO21 (`ClocklessController<21, SK6812>`), whereas 3.10.5 falls back to `ClocklessBlockingGeneric` on this IDF 4 core, toggling pins via busy-waiting CPU cycles. LED effect modes update every 30ms, which would contend for CPU cycles against I2S audio and Wi-Fi processing.
+- The release contains no functional improvements for a single SK6812: 3.10.4 release notes explicitly stated "No FastLED source code changes", and 3.10.5's 122 commits focus primarily on LPC/RP2040/C2 platforms, containerization, test fixtures, and CI.
 
-等哪个版本去掉了 iostream 依赖、并在 IDF4 上仍然走 RMT，再考虑升。
+Upgrades should be deferred until upstream removes the iostream dependency and retains hardware RMT support on IDF 4.
 
-### M5Unified 0.2.23 + M5GFX 0.2.30：有收益，但要专门测
+### M5Unified 0.2.23 + M5GFX 0.2.30: Beneficial, but Requires Targeted Regression
 
-M5Unified 0.2.23 强制要求 M5GFX ≥ 0.2.30，所以两个只能一起升。
+M5Unified 0.2.23 mandates M5GFX ≥ 0.2.30; both must be updated concurrently.
 
-收益：
+Benefits:
 
-- 麦克风的 `begin()`/`end()`/`record()` 做了串行化，ES8311 需要在 I2S 时钟运行后才写的
-  配置有了 post-start 回调。频谱页正好在反复启停麦克风。
-- 扬声器会把最后一段不满的缓冲也播完，播放器曲尾不再被截掉。
-- 新增 `setBufferReleaseCallback`，可以替掉我们自己的 `audioWaitQueueSpace` 队列轮询。
-- 几处 I2C/SPI 共享总线的竞态修复。
+- Microphone `begin()`/`end()`/`record()` calls are serialized, providing a post-start callback required by ES8311 configurations after the I2S clock starts running. The spectrum page frequently stops and restarts the microphone.
+- Speaker driver ensures partial audio buffers finish playback, eliminating premature track truncation in music players.
+- Introduces `setBufferReleaseCallback`, providing a clean replacement for custom `audioWaitQueueSpace` queue polling.
+- Resolves race conditions on shared I2C/SPI buses.
 
-代价：
+Trade-offs:
 
-- **屏幕刷新变慢一倍。** M5GFX 0.2.28 起（PR #260）修正了 ESP32-S3 在 Arduino 下 SPI
-  实际频率是请求值两倍的问题。Cardputer 配置的是 40MHz，所以现在屏幕其实一直跑在 80MHz；
-  升级后会真正降到 40MHz，整屏 `pushSprite`（64.8KB）从约 6.5ms 变成约 13ms。
-  所有页面都受影响，BadApple 这类直推屏幕的最明显。
-- 麦克风录音缓冲从双缓冲翻转改成了单个 `rec_info`，频谱页依赖 `record()`/`isRecording()`，
-  必须上机回归。
-- 板型识别探测逻辑重写，改的正好是 BMI270/ES8311 所在的内部总线。
-- Flash +13KB，RAM 基本不变。
+- **Screen refresh rate is halved.** Starting with M5GFX 0.2.28 (PR #260), an issue where ESP32-S3 Arduino SPI operated at double the requested frequency was corrected. Cardputer requests 40MHz, so the display has historically run at 80MHz. Upgrading drops this to a true 40MHz, increasing full-screen `pushSprite` (64.8KB) render times from ~6.5ms to ~13ms. All pages are affected, most noticeably direct-push animations like BadApple.
+- Microphone recording buffer migrated from double-buffered flipping to a single `rec_info` struct; spectrum page reliance on `record()`/`isRecording()` requires thorough hardware verification.
+- Board auto-detection logic was rewritten, specifically altering the internal bus containing BMI270 and ES8311.
+- Flash +13KB, RAM negligible change.
 
-### 平台 espressif32：没必要升
+### Platform espressif32: No Need to Upgrade
 
-最新的 7.1.x 给的 Arduino core 仍然是 2.0.17（IDF 4.4.7），新增的只是 ESP-IDF 6.1 框架
-支持，对 Arduino 工程没有收益。升不升都不影响 ESP8266Audio 1.9.9。
+The 7.1.x release continues to provide Arduino core 2.0.17 (IDF 4.4.7), adding framework support for ESP-IDF 6.1 which offers no benefits to Arduino projects. Neither choice impacts ESP8266Audio 1.9.9.
 
 ---
 
-## 以后要升级某个库，怎么做
+## Procedure for Upgrading Dependencies in the Future
 
-1. 开一个分支，只改 `platformio.ini` 里那**一个**依赖的版本号（M5Unified/M5GFX 例外，要一起改）。
-2. 删掉 `.pio/libdeps` 让它重新拉，确认 `pio run` 输出的 Dependency Graph 里版本确实变了。
-3. 记下 RAM/Flash，跟上面的基线比。静态 RAM 涨了超过 1KB 就要查清楚是什么。
-4. 去看这个库在两个版本之间的更新日志和提交，重点找显示、音频、I2C/SPI、RMT、电源相关的改动。
-5. 上机回归，至少过一遍：开机、频谱页（麦克风）、播放器/电台（喇叭）、LED 灯效、
-   Chat（TLS 握手，最吃堆）、GNSS 地图（48KB 底图缓存）、BadApple（刷新速度）。
-   用串口 `STAT` 看 `heap`/`largest`/`minEver` 有没有变差。
-6. 没问题再合并，并更新本文的版本表和实测数据。
+1. Create a dedicated branch modifying only the **single** targeted dependency version in `platformio.ini` (except M5Unified and M5GFX, which must be updated together).
+2. Delete `.pio/libdeps` to force a clean fetch, and verify the resolved version in the Dependency Graph emitted by `pio run`.
+3. Record RAM and Flash usage against the baseline above. If static RAM increases by more than 1KB, diagnose root causes before proceeding.
+4. Review changelogs and commits between the two versions, paying close attention to display, audio, I2C/SPI, RMT, and power management changes.
+5. Perform regression testing on hardware covering: boot sequence, spectrum analyzer (microphone), player/radio (speaker), RGB LED modes, Chat (TLS handshake, highest heap demand), GNSS map (48KB tile cache), and BadApple (frame rate). Monitor serial `STAT` for regressions in `heap`, `largest`, and `minEver`.
+6. Merge once verified, and update the version table and benchmark data in this document.

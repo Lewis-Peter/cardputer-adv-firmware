@@ -1,50 +1,52 @@
-# calctest/ —— 计算器 + 单位换算测试台
+**English** | [简体中文](README.zh-CN.md)
 
-直接编译 `src/calc.cpp`（递归下降表达式求值）和 `src/conv.cpp`（7 大类单位换算）在主机端运行。所有 Arduino / M5Unified / Preferences 依赖均由 `stubs/` 打桩为空实现。
+# calctest/ — Calculator & Unit Conversion Testbed
 
-## 测试内容（107 项）
+Directly compiles `src/calc.cpp` (recursive-descent expression parser) and `src/conv.cpp` (7 unit conversion categories) to run on the host system. All Arduino / M5Unified / Preferences dependencies are stubbed out in `stubs/` with empty implementations.
 
-### calc.cpp — 表达式求值
+## Test Coverage (107 Items)
 
-| 组 | 内容 |
+### calc.cpp — Expression Evaluation
+
+| Group | Coverage |
 |---|---|
-| 1. 基础四则 | `+` `-` `*` `/` `%`，0 与正负整数 |
-| 2. 优先级与结合性 | `*` 优先于 `+`，减法左结合，括号，幂右结合，`-2^2 = -4` |
-| 3. 一元符号 | `-x` `+x`，双重 / 三重否定 |
-| 4. 小数 | `.5` 无前导零、`1.5+1.5`、整数结果不带小数点、`1/3` 精度 |
-| 5. 错误处理 | `1/0` `0/0` `5%0` `((1)` `1)` `1..2` 空表达式 超长输入 |
-| 6. 阶乘 | `0!` `5!` `10!` `170!`（上界），`171!` `1.5!` 报错 |
-| 7. 幂 | `2^10` `2^0` `0^0` `(-2)^3` |
-| 8. 格式化 | 整数不带小数点，`-0`，科学计数法，NaN 报错 |
-| 9. 连续运算符 | `2++3` `2+-3` `2*+3`（合法一元），`2**3` 报错 |
-| 10. 深层递归保护 | 24 层深嵌套不崩溃 |
-| 11. calcKey 状态机 | 求值后接数字/运算符，退格，Ans，Clear |
+| 1. Basic Arithmetic | `+`, `-`, `*`, `/`, `%`, zero, positive and negative integers |
+| 2. Precedence & Associativity | `*` precedes `+`, left-associative subtraction, parentheses, right-associative exponentiation, `-2^2 = -4` |
+| 3. Unary Operators | `-x`, `+x`, double / triple negation |
+| 4. Decimals | `.5` without leading zero, `1.5+1.5`, integer results without decimal point, `1/3` precision |
+| 5. Error Handling | `1/0`, `0/0`, `5%0`, `((1)`, `1)`, `1..2`, empty expressions, overly long inputs |
+| 6. Factorials | `0!`, `5!`, `10!`, `170!` (upper limit), errors on `171!`, `1.5!` |
+| 7. Exponentiation | `2^10`, `2^0`, `0^0`, `(-2)^3` |
+| 8. Formatting | Integers without decimal points, `-0`, scientific notation, NaN error handling |
+| 9. Consecutive Operators | `2++3`, `2+-3`, `2*+3` (valid unary operators), error on `2**3` |
+| 10. Deep Recursion Protection | 24 levels of nested parentheses without crashing |
+| 11. calcKey State Machine | Digits/operators after evaluation, backspace, Ans, Clear |
 
-### conv.cpp — 单位换算
+### conv.cpp — Unit Conversion
 
-| 类别 | 权威参考值 & 往返 |
+| Category | Authoritative Reference Values & Roundtrips |
 |---|---|
-| 长度 | 1 inch = 2.54 cm（精确），1000 m ↔ 1 km，1 mi ≈ 1609.34 m，1 nmi = 1852 m |
-| 质量 | 1 kg = 1000 g，1 oz = 28.3495 g，1 lb = 453.592 g |
-| 温度 | **-40°C = -40°F**（唯一交叉点），0°C = 32°F，100°C = 212°F，0°C = 273.15 K |
-| 体积 | 1 L = 1000 mL，1 gal = 3785.41 mL |
-| 速度 | 1 m/s = 3.6 km/h（精确），36 km/h = 10 m/s |
-| 时间 | 1 h = 3600 s，1 wk = 7 day |
-| 面积 | 1 m2 = 10000 cm2，1 ha = 10000 m2，1 acre = 4046.86 m2 |
-| convKey 状态机 | 小数点、负号、退格、S 交换、类别切换、convEnter 去重 |
+| Length | 1 inch = 2.54 cm (exact), 1000 m ↔ 1 km, 1 mi ≈ 1609.34 m, 1 nmi = 1852 m |
+| Mass | 1 kg = 1000 g, 1 oz = 28.3495 g, 1 lb = 453.592 g |
+| Temperature | **-40°C = -40°F** (unique intersection), 0°C = 32°F, 100°C = 212°F, 0°C = 273.15 K |
+| Volume | 1 L = 1000 mL, 1 gal = 3785.41 mL |
+| Speed | 1 m/s = 3.6 km/h (exact), 36 km/h = 10 m/s |
+| Time | 1 h = 3600 s, 1 wk = 7 day |
+| Area | 1 m2 = 10000 cm2, 1 ha = 10000 m2, 1 acre = 4046.86 m2 |
+| convKey State Machine | Decimal point, minus sign, backspace, S swap, category switching, convEnter deduplication |
 
-## 发现的问题 / 已知行为
+## Discovered Issues / Known Behaviors
 
-**无 bug，均为已知设计行为：**
+**No bugs found; all are known design behaviors:**
 
-- **`-0` 显示问题**：`fmtNum(-0.0)` 在 glibc 下输出 `"-0"`（`snprintf("%.0f", -0.0)` 的标准行为）。实机上因为很少触发（0*−1 这类输入），影响可接受；若要彻底修复需对 `-0.0` 做特判（见 `src/calc.cpp` 第 108 行）。测试已加放宽断言允许 `"0"` 或 `"-0"` 两种结果。
-- **`%.6g` 精度截断**：`recalc()` 在 `conv.cpp` 第 62 行用 `%.6g`（6 位有效数字）。这导致 1609.344 m 显示为 "1609.34"，理论值丢失最后一位十进制。属于显示精度权衡，不是换算系数错误。
-- **按键驱动与求值耦合**：`calcKey`/`convKey` 是按键-状态机混合实现，无法在不走完整按键路径的情况下直接调 `parseExpr`。测试台通过逐字符 `calcKey` 驱动来覆盖真实按键路径，达到同等效果。若后续需要更细粒度的单元测试，建议将 `fmtNum` 和 `recalc` 提升为内部可测的辅助函数（加 `#ifdef HOST_TEST` 出口）。
+- **`-0` Display Behavior**: `fmtNum(-0.0)` outputs `"-0"` under glibc (standard behavior of `snprintf("%.0f", -0.0)`). On hardware, this is rarely triggered (e.g. `0*-1`), and the impact is acceptable; completely eliminating it requires a special check for `-0.0` (see `src/calc.cpp`, line 108). The testbed includes relaxed assertions accepting either `"0"` or `"-0"`.
+- **`%.6g` Precision Truncation**: `recalc()` uses `%.6g` (6 significant digits) at line 62 of `conv.cpp`. This causes 1609.344 m to display as "1609.34", dropping the last decimal place of the theoretical value. This is an intentional display precision tradeoff, not an inaccurate conversion factor.
+- **Key Driver Coupled with Evaluation**: `calcKey`/`convKey` are hybrid key-event state machines and cannot call `parseExpr` directly without traversing the full key path. The testbed feeds input character-by-character via `calcKey` to replicate actual keypad pathways. For finer-grained unit testing in the future, exposing `fmtNum` and `recalc` as testable helpers (guarded with `#ifdef HOST_TEST`) is recommended.
 
-## 运行方法
+## How to Run
 
 ```bash
 cd tools/calctest && ./build.sh
-# 开启 AddressSanitizer + UBSan：
+# Enable AddressSanitizer + UBSan:
 SAN=1 ./build.sh
 ```

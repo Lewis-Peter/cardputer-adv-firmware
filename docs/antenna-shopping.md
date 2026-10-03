@@ -1,166 +1,152 @@
-# 采购需求：VHF 接收天线（161.975 / 162.025 MHz）
+**English** | [简体中文](antenna-shopping.zh-CN.md)
 
-> 这份文档是写给采购代理（或未来的自己）的，**自带全部上下文，不需要读代码**。
-> 目的：给 LoRa 页的 AIS 蹲守模式（`src/lora.cpp`，SCAN + VHF 下按 `a`）配一根能用的天线。
+# Procurement Guide: VHF Receive Antenna (161.975 / 162.025 MHz)
 
-## 用途背景
+> This document is written for procurement or future reference and **contains full self-contained context without needing to read code**.
+> Objective: Acquire an effective antenna for the AIS guard/monitoring mode on the LoRa page (`src/lora.cpp`, SCAN + VHF, press `a`).
 
-M5Stack Cardputer ADV + Cap LoRa-1262 模块（SX1262 芯片）。原装天线是 868/915MHz 的短棒，
-现在要拿它接收船舶 AIS 信号——**161.975MHz（AIS1/ch87B）和 162.025MHz（AIS2/ch88B）**，
-所以需要一根 162MHz 频段的**接收**天线。纯接收，不发射。
+## Application Context
 
-为什么必须换：162MHz 的 1/4 波长是 **46.3cm**，原装棒只有 8cm 左右，在这个频段相当于
-1/23 波长，失配损失二十几 dB。实测 A1 信道只能收到 -100dBm 上下。换一根尺寸对的
-VHF 天线是这件事上唯一有意义的硬件投入。
+M5Stack Cardputer ADV + Cap LoRa-1262 module (SX1262 transceiver). The stock antenna is a short 868/915MHz stub.
+We want to receive maritime AIS signals—**161.975MHz (AIS1/ch87B) and 162.025MHz (AIS2/ch88B)**,
+requiring a dedicated **receive** antenna for the 162MHz band. Receive-only; no transmission.
+
+Why replacing is essential: 1/4 wavelength at 162MHz is **46.3cm**. The stock stub is only ~8cm, acting as ~1/23 wavelength on this band, resulting in mismatch losses exceeding 20dB. Real-world measurements on channel A1 sit around -100dBm. Sourcing a properly sized VHF antenna is the single most impactful hardware upgrade for this use case.
 
 ---
 
-## ⚠️ 第一步：确认接口型号（买之前必须做，做错则全部白买）
+## ⚠️ Step 1: Verify Connector Type (Must be done before buying; getting this wrong voids the purchase)
 
-**光看"中间是针还是孔"不够**，因为 SMA 和 RP-SMA 正好是反的。要**同时看螺纹和中心触点**：
+**Checking only "pin or socket in the center" is insufficient**, because SMA and RP-SMA reverse center pins and sockets. You must **inspect both the threads and center contact simultaneously**:
 
-| 座子外观 | 型号 | 要买的天线 |
+| Chassis Jack Appearance | Type | Matching Antenna Plug to Buy |
 |---|---|---|
-| **外螺纹** + 中心是**孔（凹）** | SMA 母 (SMA-K) | SMA 公 (SMA-J)：内螺纹套 + 中心针 |
-| **外螺纹** + 中心是**针（凸）** | **RP-SMA 母** | **RP-SMA 公**：内螺纹套 + 中心孔 |
-| 内螺纹套 + 中心是针 | SMA 公 (SMA-J) | SMA 母 (SMA-K) |
-| 内螺纹套 + 中心是孔 | **RP-SMA 公** | **RP-SMA 母** |
+| **External threads** + center **socket (hole)** | SMA Female (SMA-K) | SMA Male (SMA-J): Internal threads + center pin |
+| **External threads** + center **pin** | **RP-SMA Female** | **RP-SMA Male**: Internal threads + center hole |
+| Internal threads + center pin | SMA Male (SMA-J) | SMA Female (SMA-K) |
+| Internal threads + center hole | **RP-SMA Male** | **RP-SMA Female** |
 
-> 📌 **本项目早前的笔记把 Cap LoRa-1262 上那个座子记成 RP-SMA**，但仓库里没有留下确认记录。
-> **必须亲眼核对一次**再下单。板载座子通常是"外螺纹"那一类，所以关键就看中心是针还是孔：
-> 外螺纹 + 中心针 = RP-SMA，这种情况下要买的是 **RP-SMA 天线**，跟绝大多数对讲机天线
-> （SMA）不通用，需要 `SMA转RP-SMA` 转接头。
+> 📌 **Early notes previously documented the Cap LoRa-1262 chassis connector as RP-SMA**, but you must **visually verify your physical hardware once** before ordering. On-board connectors typically feature external threads:
+> External threads + center pin = RP-SMA. In this scenario, buy an **RP-SMA antenna**, which does not connect directly to standard handheld transceiver antennas (SMA) and requires an `SMA to RP-SMA` adapter.
 
-**【购买前填写】板子上的座子是：____________ ，所以天线要买：____________**
+**[Fill in before purchase] Connector on hardware is: ____________ , so antenna to purchase must be: ____________**
 
-如果最后确认是 RP-SMA，最省事的办法是买 SMA 天线 + 一个 `RP-SMA公 转 SMA母` 转接头，
-因为 SMA 的天线选择面大得多、便宜得多。
+If confirmed to be RP-SMA, the most flexible and cost-effective approach is purchasing SMA antennas along with an `RP-SMA Male to SMA Female` adapter, as standard SMA antennas are far more abundant and economical.
 
 ---
 
-## 硬性要求（不满足直接排除）
+## Strict Requirements (Disqualify if not met)
 
-1. **频段必须覆盖 162MHz**。可接受的标称：
-   - `136–174MHz`（国内对讲机 VHF 段）— 最常见，162 落在中间偏上
-   - `156–163MHz`（海事 / 船用 VHF）— 最理想，就是 AIS 本身的频段
-   - `144–148MHz`（业余 2m 段）— 勉强可用，偏低
-2. **接口**：见上面第一步的结论。**别买错极性**。
-3. **辐射体物理长度 ≥ 35cm**。162MHz 的 λ/4 = 46.3cm。短于 35cm 的在这个频段效率极低，
-   **不管标多少 dBi**。
-4. **必须是无源天线**。排除内置 LNA / 放大器 / 需要供电的有源天线——设备端没有馈线供电
-   （bias-tee）电路，接上也不工作。
-5. 阻抗 50Ω。
+1. **Band must cover 162MHz**. Acceptable ratings:
+   - `136–174MHz` (Standard 2m VHF handheld band) — Most common, 162MHz sits comfortably in upper third
+   - `156–163MHz` (Marine VHF) — Ideal; matches AIS native band
+   - `144–148MHz` (Amateur 2m band) — Marginally usable, tuned slightly too low
+2. **Connector**: Per Step 1 above. **Do not mix up polarities**.
+3. **Radiator physical length ≥ 35cm**. λ/4 at 162MHz = 46.3cm. Anything shorter than 35cm suffers extremely poor radiation efficiency on this band, **regardless of claimed dBi figures**.
+4. **Must be a passive antenna**. Exclude active antennas with integrated LNAs or amplifiers requiring DC power—the device lacks bias-tee power feed circuitry.
+5. 50Ω impedance.
 
-## 优先级排序
+## Priority Ranking
 
-1. **伸缩 / 拉杆天线（长度可调）— 最高优先。**
-   可以现场一边拉一边看设备读数，精确调到 46.3cm 附近的实际最优点，不用赌厂家调谐对不对。
-   这个价位有这种选择的话，其他都不用考虑。
-2. 长度 38–50cm 的软胶棒（NA-771 那一类）。
-3. 车载磁吸 VHF 天线 + 磁吸底座 + 馈线。性能最好（磁吸底盘就是地网），
-   但要求馈线 ≤ 4m，末端能转到目标接口。
+1. **Telescopic / Whip Antennas (Adjustable length) — Highest Priority.**
+   Allows adjusting length in real time while watching device signal readings, tuning precisely to the real-world optimum near 46.3cm without relying on factory tuning claims.
+2. Flexible rubber whips (38–50cm, such as NA-771 variants).
+3. Mobile magnetic-mount VHF antenna + base + feedline. Delivers the best performance (metal ground plane effect), but requires feedline length ≤ 4m terminating in the required connector.
 
-## 预算与数量
+## Budget & Quantity
 
-- 单价 1–10 元，总预算 30 元以内
-- **买 4–6 根不同类型/长度的，不要只买一根** —— 这个价位质量参差是常态，
-  策略是多买回来实测筛，不是挑一根完美的
-- 另配转接头各 1–2 个：`SMA-K转SMA-J`、`SMA-J转SMA-K`、`SMA转RP-SMA`、
-  `SMA转SL16(UHF/PL-259)`、`SMA转鳄鱼夹`（或 SMA 焊接头，用来接自制导线）
+- Unit cost: 1–10 CNY (~$1–$3), total budget under 30 CNY (~$5)
+- **Purchase 4–6 antennas of varying types/lengths rather than just one** — quality variance at this price tier is common; empirical filtering across multiple candidates is the intended strategy.
+- Include 1–2 adapters of each type: `SMA-K to SMA-J`, `SMA-J to SMA-K`, `SMA to RP-SMA`, `SMA to SL16 (UHF/PL-259)`, and `SMA to alligator clips` (or raw SMA pigtails for custom wire experiments).
 
-## 搜索关键词
+## Search Keywords
 
 ```
-对讲机拉杆天线 SMA
-伸缩天线 SMA 对讲机
-对讲机天线 136-174MHz
-船用对讲机天线 156-163
-海事VHF天线 SMA
-车载对讲机天线 VHF 磁吸 136-174
-NA-771 天线
+VHF telescopic antenna SMA
+Handheld whip antenna 136-174MHz
+Marine VHF antenna 156-163
+Marine VHF antenna SMA
+Magnetic mount VHF antenna 136-174
+NA-771 antenna
 ```
 
-## 需要向客服核实的（多数页面不写）
+## Questions to Clarify with Vendors
 
-1. 具体频段范围是多少？（要数字，不接受"全频段""通用型"）
-2. 接口具体型号？SMA-J / SMA-K / RP-SMA？
-3. 天线总长度多少？伸缩款的最短、最长各是多少？
-4. 无源还是有源？需不需要供电？
-5. 阻抗是 50Ω 吗？
-6. （车载款）馈线多长？末端是什么接头？
+1. What is the exact frequency range? (Request exact numbers; reject "all-band" or "universal" claims)
+2. What is the exact connector model? SMA-J / SMA-K / RP-SMA?
+3. What is the total physical length? Minimum and maximum lengths for telescopic models?
+4. Is it passive or active? Does it require DC power?
+5. Is the impedance 50Ω?
+6. (Magnetic mounts) How long is the coax cable and what plug terminates it?
 
-**客服答不出第 1、2 条的直接换一家** —— 这两个说不清楚的基本是贴牌通用货。
+**Switch vendors if they cannot clearly answer questions 1 and 2** — inability to specify these usually indicates generic white-label resellers.
 
-## 明确排除
+## Explicitly Excluded
 
-- 长度 <20cm 的"迷你 / 超短 / 隐藏式"天线 —— 162MHz 上物理不成立
-- 长度很短却标称高增益（8dBi 以上）的 —— 自相矛盾，虚标
-- WiFi / 路由器天线（2.4GHz / 5GHz）
-- 车载收音机天线（FM 88–108MHz）
-- GPS / 北斗天线（1.5GHz，且多为有源）
-- LoRa 868 / 915MHz 天线（就是现在这根，要换掉的）
-- 纯装饰 / 模型天线
+- Antennas <20cm ("mini", "stubby", or "stealth") — physically ineffective at 162MHz
+- Short antennas with unrealistic gain claims (≥8dBi) — physically contradictory false specs
+- Wi-Fi / Router antennas (2.4GHz / 5GHz)
+- Car broadcast radio antennas (FM 88–108MHz)
+- GPS / BeiDou antennas (1.5GHz, typically active)
+- LoRa 868 / 915MHz antennas (the stock antenna being replaced)
+- Decorative or dummy antennas
 
-## 输出要求（给采购代理）
+## Output Requirements (For Procurement)
 
-给 4–6 个候选，每个列：
+Present 4–6 candidates, detailing each:
 
-| 项 | 内容 |
+| Item | Details |
 |---|---|
-| 链接 / 店铺 | |
-| 单价 | |
-| 标称频段 | |
-| 接口型号（含性别 / 极性） | |
-| 物理长度（伸缩款给范围） | |
-| 有源 / 无源 | |
-| 客服确认要点 | 转述或截图 |
-| 推荐理由 + 风险点 | |
+| Link / Store | |
+| Unit Price | |
+| Nominal Frequency Band | |
+| Connector Model (Gender / Polarity) | |
+| Physical Length (Range for telescopic) | |
+| Passive / Active | |
+| Vendor Confirmation Summary | Notes or screenshots |
+| Recommendation & Identified Risks | |
 
-最后说明这 4–6 根覆盖了哪些不同方案，确认不是买了 5 根同款。
-
----
-
-## 收货后怎么验（用设备自己筛）
-
-这套 AIS 蹲守本身就是天线对比仪，比看评论和标称增益靠谱得多 —— 它测的就是实际要用的
-那两个频点、实际这块板子的前端。
-
-### 1. 先剔除死天线（5 秒）
-
-进 LoRa → SCAN → `v` 切 VHF，看底噪。**接上天线后底噪应该明显抬高**（天线把环境噪声引进来了）。
-接与不接读数一样的，说明里面没有辐射体，直接扔。
-
-### 2. 再横向比较
-
-每根天线按同一流程跑：
-
-1. `v` 进 VHF → `a` 开蹲守（开头一秒会自动扫频挑对照点）
-2. **`DEBUG OFF`**（调试条会把底部读数整行盖住），或插 USB 看串口
-3. 蹲满 3 分钟，记录底部这行：`avg±N  d±N  up N  dn N  pk N`
-
-判读：
-
-- **`pk` 最高、`up` 最多、而 `dn` 保持 0** 的那根最好
-- `dn` 追上 `up` = 在吃噪声。注意 up 是能量偏移计数，不是收到的报文数——这套是纯 RSSI 检测，不解调
-- `avg` 是 AIS 信道相对空频点的持续抬升，纯噪声下应该在 0 附近
-
-拉杆天线可以多拉几个长度各蹲一轮找实际最优点。理论值 46.3cm，但受地网和外壳影响，
-实测可能偏移几厘米。
-
-### 3. 比较时的注意事项
-
-- **天线必须竖直**。AIS 是垂直极化，横着放白丢十几 dB。
-- **设备位置和朝向必须一致**。挪个位置的影响可能比换天线还大，会把对比搞脏。
-- VHF 是视距传播：站高、面向海面、别隔着钢筋混凝土墙。
+Summarize how these 4–6 choices span distinct design approaches to avoid duplicate models.
 
 ---
 
-## ⚠️ 安全提醒
+## Post-Delivery Validation (Benchmarking on Hardware)
 
-`HARDWARE.md` 记着「先接天线再上电：Cap LoRa-1262 的射频前端不能空载发射，会永久损坏」。
-这条对**严重失配**同样适用：
+The firmware's AIS guard mode functions as an effective antenna comparator, providing far more trustworthy data than vendor ratings because it directly measures the exact frequencies and frontend hardware.
 
-**换上 VHF 天线之后，绝对不要进 LoRa 的 CHAT 模式。** CHAT 是在 868MHz 上真发射，
-接着一根 162MHz 的天线约等于空载，可能烧掉功放。
+### 1. Weed Out Dead Antennas (5 seconds)
 
-AIS 蹲守（`a`）和 SCAN 都是纯接收，安全。
+Enter LoRa → SCAN → press `v` to switch to VHF, and observe noise floor. **Connecting an antenna must noticeably elevate the noise floor** (as environmental noise enters through the radiator). If readings remain unchanged with or without the antenna, the unit lacks internal electrical connection and should be discarded.
+
+### 2. Side-by-Side Comparison
+
+Run each antenna through identical steps:
+
+1. Press `v` for VHF → press `a` to start guard mode (automatically scans for a baseline reference in the first second).
+2. Ensure **`DEBUG OFF`** is set (the debug bar obscures bottom telemetry), or monitor via USB serial.
+3. Observe for 3 minutes and record the bottom line: `avg±N  d±N  up N  dn N  pk N`
+
+Interpretation:
+
+- The best antenna exhibits **highest `pk`, highest `up`, with `dn` remaining at 0**.
+- `dn` catching up to `up` indicates the antenna is primarily picking up noise spikes. Note that `up` reflects energy threshold excursions rather than demodulated packet counts (this mode measures raw RSSI energy without FSK demodulation).
+- `avg` represents continuous elevation of the AIS channel relative to the quiet baseline, and hovers near 0 in pure thermal noise.
+
+For telescopic antennas, adjust extension lengths in steps to discover the optimal real-world length. While the theoretical quarter-wave length is 46.3cm, ground plane interactions and casing influence may shift this by several centimeters.
+
+### 3. Measurement Precautions
+
+- **Antennas must remain vertical**. AIS signals are vertically polarized; horizontal orientation incurs >10dB cross-polarization loss.
+- **Maintain identical device positioning and orientation**. Shifting location often alters RF environments more than swapping antennas, invalidating comparative readings.
+- VHF propagation relies on line-of-sight: position the device with open sightlines toward water bodies and away from reinforced concrete walls.
+
+---
+
+## ⚠️ Safety Warning
+
+[`HARDWARE.md`](../HARDWARE.md) explicitly warns: "Connect antenna before powering on: the Cap LoRa-1262 frontend cannot withstand unloaded transmissions, which cause permanent damage."
+This rule applies equally to **severe impedance mismatch**:
+
+**After installing a VHF antenna, NEVER enter LoRa CHAT mode.** CHAT transmits live packets on 868MHz; transmitting into a 162MHz antenna presents a severe impedance mismatch approaching an open load, risking RF power amplifier burnout.
+
+AIS guard mode (`a`) and SCAN operate purely in receive mode and are entirely safe.

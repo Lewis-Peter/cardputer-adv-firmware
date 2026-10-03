@@ -1,78 +1,80 @@
-# 离线传统地图方案与待办规划 (GNSS Map Offline Plan)
+**English** | [简体中文](map-offline-todo.zh-CN.md)
 
-> **创建日期**：2026-09-29  
-> **适用硬件**：M5Stack Cardputer (ESP32-S3FN8, 无外置 PSRAM, 320KB SRAM, 8MB Flash)  
-> **相关代码**：[`src/gnss.cpp`](../src/gnss.cpp), [`tools/download_tiles.py`](../tools/download_tiles.py)
+# Offline Conventional Map Plan & Roadmap (GNSS Map Offline Plan)
 
----
-
-## 一、背景与设计决策
-
-### 1. 为什么替换原有的单纯在线卫星图？
-- **户外脱网痛点**：Cardputer 作为随身便携终端，出门野外/车上通常没有稳定的 Wi-Fi，原版依赖高德在线瓦片会导致无网时卡顿、无法加载或退回无路网的粗糙世界轮廓。
-- **传统地图需求**：卫星图在无标注时辨识度有限（小路、河流、地名难以分辨），用户更倾向于传统的**白底/暗黑标准街道矢量瓦片（OpenStreetMap / Carto Dark / 高德路网）**。
-- **内存墙破局**：在无 PSRAM 设备上，PNG 解码需要 32KB 连续 LZ77 窗口，极易 OOM；而将瓦片在 PC 端预处理为标准 JPEG 格式存入 SD 卡，Cardputer 即可复用仅需 ~3KB 缓冲的 `tjpgd` 流式解码器，实现零内存溢出风险的纯本地秒开。
+> **Creation Date**: 2026-09-29  
+> **Target Hardware**: M5Stack Cardputer (ESP32-S3FN8, no external PSRAM, 320KB SRAM, 8MB Flash)  
+> **Related Code**: [`src/gnss.cpp`](../src/gnss.cpp), [`tools/download_tiles.py`](../tools/download_tiles.py)
 
 ---
 
-## 二、全国地图数据量实测与可行性剖析
+## 1. Background & Design Decisions
 
-以覆盖中国全境（约全球陆地 2.2% 面积）做 Web Mercator 瓦片计算：
+### Why Replace Legacy Online-Only Satellite Imagery?
+- **Outdoor Offline Pain Point**: As a portable handheld device, Cardputer often lacks stable Wi-Fi during outdoor or in-vehicle use. The legacy implementation's reliance on online satellite tiles resulted in loading hangs, dropped frames, or fallback to coarse world outlines without street details.
+- **Demand for Standard Roadmaps**: Satellite imagery without labels offers limited legibility (trails, rivers, and place names are difficult to discern). Standard **light/dark street vector tiles (OpenStreetMap / Carto Dark / standard road networks)** are much more practical.
+- **Breaking the Memory Wall**: On hardware lacking PSRAM, decoding PNG tiles requires a 32KB contiguous LZ77 sliding window, frequently triggering OOM crashes. Pre-processing tiles into standard JPEG on a PC and storing them on MicroSD enables Cardputer to stream decode using `tjpgd` requiring only ~3KB buffer, ensuring zero-OOM local instant loading.
 
-| 缩放级别 | 代表尺度 | 单屏视野跨度 | 全国瓦片总数 | 存储体积 (JPEG) | FAT32 可行性与评估 |
+---
+
+## 2. Nationwide Map Data Volume & Feasibility Analysis
+
+Calculations based on Web Mercator tile coverage for mainland China (~2.2% of global land area):
+
+| Zoom Level | Scale Metric | Viewport Width | Total Tiles (China) | Storage Size (JPEG) | FAT32 Feasibility & Assessment |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Zoom 5** | 全国/大省 | 约 1,200 km | 约 30 张 | 约 300 KB | **秒下，极轻量** |
-| **Zoom 8** | 地级市/区域 | 约 150 km | 约 1,500 张 | 约 15 MB | **1 分钟下完** |
-| **Zoom 11** | 区县/国道干线 | 约 18 km | 约 9.5 万张 | 约 750 MB | **强烈推荐全量保存**（高速/省道/水系全覆盖） |
-| **Zoom 14** | 街道/乡镇 | 约 2.3 km | 约 600 万张 | 约 45 GB | ⚠️ **超出 FAT32 单卡 419 万文件总数上限** |
-| **Zoom 16** | 街区/巷道 | 约 570 m | 约 9,600 万张 | 约 750 GB | ❌ **文件量爆炸，服务器必封 IP，无法散装存储** |
+| **Zoom 5** | National / Provinces | ~1,200 km | ~30 | ~300 KB | **Instant download, negligible size** |
+| **Zoom 8** | Prefectures / Regions | ~150 km | ~1,500 | ~15 MB | **Completes in 1 minute** |
+| **Zoom 11** | Counties / National Highways | ~18 km | ~95,000 | ~750 MB | **Strongly recommended for full offline storage** (Highways/provincial roads/waterways) |
+| **Zoom 14** | Towns / Streets | ~2.3 km | ~6,000,000 | ~45 GB | ⚠️ **Exceeds FAT32 4.19M total file count limit** |
+| **Zoom 16** | Neighborhoods / Alleys | ~570 m | ~96,000,000 | ~750 GB | ❌ **File count explosion; servers will rate limit; infeasible as loose files** |
 
-### 结论与黄金策略：
-- **全国宏观底图**：全量下载 `Zoom 5 + Zoom 8 + Zoom 11`（约 9.6 万张，不到 800MB），全国任何偏远角落皆有国道与区县轮廓。
-- **局部精细街道**：对常住城市、旅游或越野目标区下载 `Zoom 14 + Zoom 16`（每个城市约 2~4 万张，仅 150~300MB）。
-
----
-
-## 三、当前已完成功能 (Completed)
-
-- [x] **固件端离线瓦片检索与渲染支持** ([`src/gnss.cpp`](../src/gnss.cpp)):
-  - 支持标准目录与命名：`/map/{z}/{x}/{y}.jpg`、`/tiles/{z}/{x}/{y}.jpg`、`/map/{z}/{x}_{y}.jpg`。
-  - SD 卡在位时，跳过 Wi-Fi 检查直接触发 `JOB_TILE`，实现几十毫秒内秒开。
-  - 混合回退机制：SD 有则读 SD，SD 缺失且有 Wi-Fi 则补充在线拉取，均无则降级内置矢量掩码。
-- [x] **坐标系自动校准（WGS-84 vs GCJ-02）**:
-  - 自动检测 SD 卡 `/map/wgs84` 或 `/map/osm` 标牌文件；存在则按标准 WGS-84 直投，否则按国内高德标准做 GCJ-02 纠偏。
-- [x] **智能暗黑主题保护与对比度优化**:
-  - 瓦片亮度 16 点采样：若为 Carto Dark 等暗黑路网图跳过压暗；若为浅色日间街道图则柔和降亮，确保 GPS 定位点、尾迹、比例尺与顶栏清晰分明。
-- [x] **档位扩展**:
-  - `ZOOMS[] = {0, 5, 8, 11, 14, 16}`，支持一键放大到街区级（z16，单屏约 570m 宽度）。
-  - 顶栏状态显示 `z.. SD` 标识。
-- [x] **配套离线切片工具** ([`tools/download_tiles.py`](../tools/download_tiles.py)):
-  - 支持按城市名（OSM Nominatim 自动地理编码）或经纬度+半径拉取。
-  - 支持 `dark` (CartoDB 暗黑街道路网)、`osm` (标准街道图)、`amap` (高德矢量路网)、`amap-sat` (高德卫星)。
-  - 自动完成 PNG 到高质量紧凑 JPEG 转换，并生成坐标标牌。
+### Conclusions & Recommended Strategy
+- **Macro National Base Map**: Download all tiles for `Zoom 5 + Zoom 8 + Zoom 11` (~96,000 tiles, under 800MB), ensuring national highways and county boundaries everywhere.
+- **Targeted Local Street Maps**: Download `Zoom 14 + Zoom 16` for home cities, travel destinations, or off-road exploration zones (~20,000–40,000 tiles per city, only 150–300MB).
 
 ---
 
-## 四、待办事项清单 (TODO List)
+## 3. Completed Features
 
-### 阶段 1：数据准备与真机实测 (近期)
-- [ ] **准备样板全国底图与本地测试包**：
-  - [ ] 运行 `python3 tools/download_tiles.py --lat 35.0 --lon 105.0 --radius 2500km --zooms 5,8 --style dark --out ./map_china` 生成全国骨架包。
-  - [ ] 为 1~2 个重点城市（如杭州/北京/深圳）下载 `z11, z14, z16` 完整路网。
-  - [ ] 拷贝至 TF 卡并上机测试不同缩放层级（`[` / `]`）的切片平滑度与 GPS 定位点贴合度。
-- [ ] **按键平移漫游支持 (Pan/Scroll)**：
-  - [ ] 当前地图中心绑定在当前 GPS 定位点；评估增加浏览模式（按住某个组合键或长按方向键平移地图中心查看周边路况）。
+- [x] **Firmware Offline Tile Indexing and Rendering** ([`src/gnss.cpp`](../src/gnss.cpp)):
+  - Supports standard directories and naming conventions: `/map/{z}/{x}/{y}.jpg`, `/tiles/{z}/{x}/{y}.jpg`, `/map/{z}/{x}_{y}.jpg`.
+  - When MicroSD is inserted, bypasses Wi-Fi checks and schedules `JOB_TILE` directly, loading within tens of milliseconds.
+  - Hybrid fallback chain: reads SD if present; falls back to online HTTP fetch if SD tile is missing and Wi-Fi is connected; drops back to built-in vector mask if both fail.
+- [x] **Automatic Coordinate System Calibration (WGS-84 vs GCJ-02)**:
+  - Detects `/map/wgs84` or `/map/osm` marker files on SD; projects directly with standard WGS-84 when present, or applies GCJ-02 offset for domestic Chinese tile providers.
+- [x] **Smart Dark Theme Protection & Contrast Enhancement**:
+  - 16-point tile luminance sampling: dark themes like Carto Dark bypass darkening; light daytime street maps are softly dimmed to ensure GPS markers, trails, scale indicators, and status bars remain distinct.
+- [x] **Zoom Tier Expansion**:
+  - `ZOOMS[] = {0, 5, 8, 11, 14, 16}`, supporting zoom in down to street block level (z16, ~570m viewport width).
+  - Status bar displays `z.. SD` indicator.
+- [x] **Companion Offline Tile Tool** ([`tools/download_tiles.py`](../tools/download_tiles.py)):
+  - Download by city name (automatic OSM Nominatim geocoding) or lat/lon + radius.
+  - Styles supported: `dark` (CartoDB dark street network), `osm` (standard OSM street map), `amap` (AutoNavi vector streets), `amap-sat` (AutoNavi satellite).
+  - Automatic PNG-to-JPEG conversion and coordinate marker file generation.
 
-### 阶段 2：单文件打包存储探索 (中远期，解决海量小文件问题)
-- [ ] **单文件瓦片归档格式调研（.pak / .bin / 紧凑型 SQLite）**：
-  - *动机*：若用户希望存入数十个城市的精细路网，FAT32 目录下成千上万的小文件不仅拷贝极慢，还会占用大量 inode。
-  - *方案*：设计一种极简的**只读单文件索引格式**（Magic Head + Index Table `[z, x, y, offset, length]` + JPEG Data Stream）：
-    - Cardputer 启动时只读几十 KB 的索引区进内存（或在 SD 卡上按二分查找 `f.seek()` 索引），读取瓦片时直接 `f.seek(offset)` 流式解压。
-    - 在 PC 端脚本增加 `--pack` 选项，一键输出单个 `china.pak` 或 `hangzhou.pak`。
+---
 
-### 阶段 3：户外与战术导航特性扩展
-- [ ] **GPX 轨迹导入与叠图导航**：
-  - [ ] 支持读取 SD 卡 `/gpx/` 目录下的 `.gpx` 轨迹文件，在离线街道底图上以高亮粗线叠加计划路线。
-  - [ ] 航点（Waypoint）在底图上标注微图标或名称。
-- [ ] **车头朝向旋转（Heading-up Mode）评估**：
-  - [ ] 目前地图为固定“上北下南”（North-up）；评估在运动速度 > 3km/h 时，是否提供按航向角旋转的动态罗盘视图选项。
+## 4. TODO List
+
+### Phase 1: Data Preparation & Hardware Testing (Near-Term)
+- [ ] **Prepare Reference National Base Map & Local Test Packages**:
+  - [ ] Run `python3 tools/download_tiles.py --lat 35.0 --lon 105.0 --radius 2500km --zooms 5,8 --style dark --out ./map_china` to generate the national backbone package.
+  - [ ] Download complete `z11, z14, z16` street networks for 1–2 target cities (e.g. Hangzhou / Beijing / Shenzhen).
+  - [ ] Copy to TF card and verify zoom step (`[` / `]`) transitions and GPS marker alignment on device.
+- [ ] **Pan / Scroll Map Navigation**:
+  - [ ] Currently the map center locks to the GPS fix position; evaluate adding a free-browse mode (panning the map center via modifier key + arrow keys to explore surrounding areas).
+
+### Phase 2: Single-File Archive Storage Exploration (Mid/Long-Term, Solving Small-File Overhead)
+- [ ] **Single-File Archive Storage Investigation (.pak / .bin / Compact SQLite)**:
+  - *Motivation*: Storing high-zoom tiles across dozens of cities leads to tens of thousands of loose files, resulting in slow FAT32 file operations and heavy inode overhead.
+  - *Approach*: Design a lightweight **read-only single-file indexed format** (Magic Header + Index Table `[z, x, y, offset, length]` + JPEG Data Stream):
+    - Load a small ~tens-of-KB index into RAM on boot (or binary search index on SD via `f.seek()`), then stream-decompress tiles with direct `f.seek(offset)`.
+    - Add a `--pack` option to the PC script to output single archives like `china.pak` or `hangzhou.pak`.
+
+### Phase 3: Outdoor & Tactical Navigation Extensions
+- [ ] **GPX Track Import & Route Overlay**:
+  - [ ] Support loading `.gpx` tracks from `/gpx/` on SD, rendering planned routes as bold highlighted polylines over offline maps.
+  - [ ] Display micro icons or waypoint labels on the base map.
+- [ ] **Heading-up Dynamic Orientation Evaluation**:
+  - [ ] Currently maps are fixed North-up; evaluate providing an optional heading-up compass rotation mode when moving speed > 3 km/h.

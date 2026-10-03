@@ -1,182 +1,137 @@
-# 查 BLE 拆除路径那个偶发卡死
+**English** | [简体中文](ble-teardown.zh-CN.md)
 
-2026-08-09 的一整天。结论先写在前面：**没修好**——蓝牙来回切几次之后还是得重启，
-UI 上已经明说了。但这一天产出的东西比结论值钱：一套取证设施（`src/bctrail.*`，已在
-main 里）、两条方法论上的教训，以及一堆能省掉别人重走一遍的实测数字。
+# Diagnosing Intermittent Hangs in the BLE Teardown Path
 
-尝试修复的代码留在分支 `wip/ble-destructor-leak-fix`，**没有合入、也不建议合入**，
-理由见最后一节。
+A full day's investigation on 2026-08-09. Summary up front: **not resolved**—switching Bluetooth back and forth repeatedly still eventually necessitates a reboot, which is explicitly noted in the UI. However, the artifacts produced during this investigation are more valuable than the immediate outcome: a persistent forensic mechanism (`src/bctrail.*`, now merged in firmware), two methodological lessons, and hard empirical data that will save others from retreading this path.
 
----
-
-## 背景：为什么会去动这个
-
-Arduino 的 `ESP32 BLE Arduino` 库没有拆除路径——`BLEServer` 连析构函数都没声明，
-`createServer()` 直接覆盖上一个。于是每走一轮 `btHidSetup()` 就把一整套
-server + service + characteristic + descriptor 永久漏掉。实测最大连续块：
-
-```
-63476 → 23540 → 18420 → 17396 → 10740 → （继续跌到崩）
-```
-
-`MEMCAP` 的块数印证了这是泄漏而不是纯碎片：来回两次，空闲总量 73460→80032（**反而涨了**），
-已分配块 401→593。多出的 192 块永不释放，像钉子一样把连续空间钉碎。
+The experimental patch remains on an experimental branch; **it was not merged into mainline and merging is not recommended**, for reasons detailed in the final section.
 
 ---
 
-## 第一轮：把库 vendor 进来补析构
+## Background: Why Touch BLE Teardown in the First Place
 
-把库抄进 `lib/BLE/`（跟框架原版只差 52 行、9 个文件），照持有树递归 delete，
-新增 `BLEDevice::destroyServer()`。几处关键判断，事后看都是对的：
-
-- **`BLEHIDDevice::~` 保持空的。** 它持有的是 server 树的**非拥有别名**，再 delete
-  一次就是 double free。真正的 owner 是 `BLEServer → ServiceMap → CharacteristicMap`。
-- **`BLECharacteristic::~` 里那行被注释掉的 `free` 没有放开。** `m_value` 是 `BLEValue`，
-  内部由 `std::string` 管理，放开会把不属于自己的地址当堆块释放。
-- **`createServer()` 改成"已有就返回"**，避免直接覆盖旧 server 造成整棵树失联。
-
-### 内存效果：确实修好了
-
-同样的操作序列（蓝牙 ↔ Calc 来回切），看 largest：
+Arduino's `ESP32 BLE Arduino` library provides no teardown mechanism—`BLEServer` does not even declare a destructor, and `createServer()` simply overwrites previous instances. Consequently, every invocation of `btHidSetup()` permanently leaks an entire tree of server + service + characteristic + descriptor objects. Real-world measurements of the largest free continuous heap block:
 
 ```
-基准线： 63476 → 23540 → 18420 → 17396 → 10740 → （持续下降到崩）
-修复后： 63476 → 25588 → 22516 → 19444 → 19444 → 18420 → 收敛不再跌
+63476 → 23540 → 18420 → 17396 → 10740 → (continues dropping until crash)
 ```
 
-从"持续下降到崩溃"变成"收敛在 18~19KB"，这正是修好泄漏该有的形状。
-**这条结论独立成立**，后面卡死那摊事没有推翻它。
-
-### 但引入了偶发卡死
-
-约每 10 次来回挂一次，第 3~9 轮之间随机。关键证据：
-
-- **卡死时 largest 还有 18420，内存充足**——不是内存耗尽（老代码第 5 轮卡死是内存耗尽，
-  那是另一回事）。
-- Saved PC 落在 `esp_pm_impl_waiti`，说明是**阻塞**不是 panic，主循环在等一个不会来的东西。
-
-对随身设备来说，偶发卡死比缓慢泄漏更糟：后者可预测、重启能恢复。所以留在了分支上。
+Block counts from serial `MEMCAP` confirm this is genuine leakage rather than pure fragmentation: after two cycles, total free heap shifted from 73460 to 80032 (**actually increased**), while allocated blocks surged from 401 to 593. The 192 extra unreleased blocks permanently fragment continuous RAM like scattered nails.
 
 ---
 
-## 教训一：插桩会掩盖故障（典型 Heisenbug）
+## Round 1: Vendoring the Library to Implement Destructors
 
-第一个假设是 FreeRTOS 信号量：这些对象每个都挂着信号量（service 4 个 / characteristic 3 个），
-而 FreeRTOS 明确规定**不能删除还有任务阻塞在上面的信号量**，时机取决于 BLE 栈任务那一刻
-在干什么，正好解释"偶发"。
+The library was vendored into `lib/BLE/` (differing by only 52 lines across 9 files compared to framework upstream) to implement recursive `delete` traversals across ownership trees and add `BLEDevice::destroyServer()`. Key architectural decisions, which proved correct in hindsight:
 
-于是在析构每一步之间打串口标记 + `Serial.flush()`。**15 轮一次没挂。**
+- **`BLEHIDDevice::~` remains empty.** It holds a **non-owning alias** into the server tree; calling delete would cause a double free. The true owner is `BLEServer → ServiceMap → CharacteristicMap`.
+- **The commented-out `free` inside `BLECharacteristic::~` was not reinstated.** `m_value` is a `BLEValue` backed internally by `std::string`; calling `free` attempts to deallocate non-heap memory.
+- **`createServer()` was modified to "return existing instance if present"**, preventing orphaned trees when overwriting.
 
-也就是说，把析构过程摊开在时间上，故障就消失了。所以标记法拿不到现场——最后一条标记
-永远是正常的那一条。这条本身是信息：敏感点在析构序列**内部的节奏**上。
+### Memory Impact: Leak Successfully Fixed
 
-> **可迁移的那部分**：查竞态时，任何带 I/O 的插桩都可能把窗口撑开到故障消失。
-> 记录动作必须便宜到不改变时序。这直接催生了后面那套面包屑。
-
-## 教训二：加延时只降频率，不消除
+Tracking the largest contiguous block across identical switching sequences (Bluetooth ↔ Calc):
 
 ```
-无延时                  第 3、9 轮挂      约 1/8
-deinit 后 delay(200)     第 15 轮挂        约 1/15
-每 service delay(20)     第 35 轮挂        约 1/35
+Baseline:  63476 → 23540 → 18420 → 17396 → 10740 → (continuous decline until crash)
+Patched:   63476 → 25588 → 22516 → 19444 → 19444 → 18420 → converges steadily
 ```
 
-频率随延时量近似成比例下降——**竞态的典型特征**。说明加延时这条路根本走不通：
-加到多少都只是把概率往下压，永远留一条尾巴。
+Transforming continuous decline into stable convergence around 18–19KB confirms the leak was genuinely eliminated. This conclusion stands independently of subsequent hang issues.
 
-顺带也证伪了信号量那个假设，或者说 200ms 根本不够：在 `deinit` 和 `delete` 之间
-插 `delay(200)`，第一轮 12 次干净，第二轮第 3 次就挂。
+### But Introducing Intermittent Hangs
+
+Approximately 1 hang occurred every 10 cycles, distributed randomly between rounds 3 and 9. Critical evidence:
+
+- **At the moment of hang, largest block remained at 18420 with ample heap**—this was not an out-of-memory failure (earlier firmware crashing at round 5 was OOM; this was distinct).
+- Saved PC halted at `esp_pm_impl_waiti`, confirming a **blocking stall** rather than a panic: the main loop was waiting indefinitely for an event that never arrived.
+
+For a handheld device, intermittent random hangs are worse than gradual leaks: the latter are predictable and easily cleared with scheduled restarts. The fix was therefore kept out of mainline.
 
 ---
 
-## 教训三：换成不扰动时序的取证——面包屑
+## Lesson 1: Instrumentation Masks Failures (Classic Heisenbug)
 
-`RTC_NOINIT` 内存里的环形缓冲：`bcMark()` 只做一次字节写入 + 下标自增，零 I/O 零锁。
-卡死后靠复位存活，开机自动回放，也能用串口 `TRAIL` 随时读。
+The initial hypothesis centered on FreeRTOS semaphores: each BLE object maintains semaphores (4 per service, 3 per characteristic), and FreeRTOS strictly mandates that **semaphores with tasks blocked on them must not be deleted**. Timing depends on asynchronous BLE stack operations, potentially explaining the randomness.
 
-**这次抓到了现场。** 连续两次卡死，面包屑都终止在同一处：
+Serial logging markers + `Serial.flush()` were added between each teardown step. **Over 15 test cycles, zero hangs occurred.**
+
+Stretching the teardown execution across time made the bug disappear entirely. Logging could not capture the crash site—the final log line was invariably the last benign step. This behavior was itself informative: the bug was sensitive to the **internal cadence** of the teardown sequence.
+
+> **General takeaway**: When diagnosing race conditions, any instrumentation involving I/O risks expanding timing windows enough to mask the bug. Telemetry must be cheap enough to avoid perturbing execution schedules. This insight motivated the creation of the breadcrumb system.
+
+## Lesson 2: Adding Delays Reduces Frequency but Never Eliminates Race Conditions
 
 ```
-... 1F <SERVER出   06 destroySrv后   00 注销GATTS前   01 deinit前
-（02 deinit后 从未出现）
+No delay                  Hangs on rounds 3, 9    ~1 in 8
+delay(200) after deinit   Hangs on round 15       ~1 in 15
+delay(20) per service     Hangs on round 35       ~1 in 35
 ```
 
-也就是说**对象树析构完整跑完、干干净净**，阻塞发生在下一轮的 `BLEDevice::deinit()` 内部。
+Failure frequency decreased roughly in proportion to inserted delays—**a textbook indicator of race conditions**. Adding arbitrary delays never solves the underlying defect; it merely pushes probabilities down while leaving a lingering failure tail.
 
-> 判读要点：看**哪个编号没出现**。`02` 从未出现，说明卡在 `01` 和 `02` 之间，
-> 也就是 `deinit()` 里面。
-
-### 所有人都找错了地方
-
-前两轮的注意力全押在析构上——方向就是错的。而整个 BLE 生命周期设计
-（**永不 deinit、只 enable/disable**，见 `bt.cpp` 顶部）本来就是为了绕开 deinit 的不可靠，
-`btReleaseForOtherApps()` 是全项目唯一还调 `deinit` 的地方。
-
-回头看，同一天早些时候 main 那版第 5 轮卡死（largest 剩 7668），当时归因于内存耗尽，
-**现在看很可能也是同一个 deinit 阻塞，只是被低内存掩盖了。**
+This also disproved the simple semaphore hypothesis: inserting `delay(200)` between `deinit` and `delete` ran cleanly for 12 rounds in cycle 1, then hung on round 3 in cycle 2.
 
 ---
 
-## 顺带发现：GATTS app 槽位泄漏（真问题，但不是这个卡死的原因）
+## Lesson 3: Timing-Preserving Forensics — Breadcrumbs
 
-库里 `createApp()` 每次 `esp_ble_gatts_app_register(m_appId++)`，而 **GATTS 侧从来不注销**
-（只有 client 侧有 unregister，还注释掉一半）。Bluedroid 的 GATTS 槽位有限，反复重建会耗尽。
+A ring buffer in `RTC_NOINIT` memory: `bcMark()` performs a single byte write and index increment, zero I/O, zero locks. Survives warm reboots and automatically replays upon boot, also readable anytime via serial `TRAIL`.
 
-分支里加了 `BLEDevice::unregisterServerApp()`，并把 `btReleaseForOtherApps()` 改成三段式：
-**注销（协议栈还活着）→ deinit → 删对象（回调已停）**。实测加了之后仍在第 9 轮卡住，
-且面包屑证明注销本身成功了——所以它不是本次卡死的原因。
+**This captured the exact failure point.** Across two consecutive hangs, breadcrumbs terminated at the exact same sequence:
 
-⚠️ **这条在 main 里是否真的会耗尽，没有验证过。** main 的流程确实还在跑这条路
-（`btReleaseForOtherApps()` 清 `hidStarted` → 下次进蓝牙 `btHidSetup()` → `createServer()`
-→ `createApp(m_appId++)`），但 `deinit(false)` 走的 `esp_bluedroid_disable` 有没有把旧注册
-一起回收，没人查过。要坐实这条得上机测，别照抄结论。
+```
+... 1F <SERVER_EXIT   06 after_destroySrv   00 before_GATTS_dereg   01 before_deinit
+(02 after_deinit NEVER APPEARED)
+```
 
----
+The entire object tree destructor ran to completion cleanly; the hang occurred inside the subsequent call to `BLEDevice::deinit()`.
 
-## 为什么不合入那个分支
+> Diagnostic rule: Look for **which index is absent**. The total absence of `02` proved the stall occurred between `01` and `02`, inside `deinit()`.
 
-要拿到内存修复，就得连整个 vendor 进来的 BLE 库（约 15k 行）一起吞，而那个版本带着
-约 1/10 的偶发卡死。**净亏。** 当前 main 的取舍是：接受泄漏，在蓝牙菜单上提前警告余量
-（低于 20KB 标橙 `restart soon`，低于 13KB 标红 `restart before using`），让人主动重启。
-在 MCU 上重启是合法策略。
+### Searching in the Wrong Place
 
-## 下一步真要接着查的话
+Prior debugging spent two entire rounds focusing on destructors—the wrong target. The overarching firmware architecture (**never deinit BLE; only enable/disable**, noted in `bt.cpp`) was designed precisely to bypass unreliable deinit routines; `btReleaseForOtherApps()` was the sole location still calling `deinit`.
 
-- **卡死时打 `vTaskList()`**——直接看是哪个任务阻塞在什么上，而不是猜。装个定时器在主循环
-  停滞时输出，平时不扰动时序。`bctrail` 的停滞看门狗已经是这个形状了，把 `vTaskList()`
-  加进去就行。
-- **或者上 JTAG**，卡死时直接看调用栈（Linux 上的 udev 规则见 `docs/linux-setup.md`）。
-- 标记法已经证明不可用（会掩盖），不要再走。
-
-## 留下来的东西
-
-`src/bctrail.{h,cpp}`——面包屑 + 主循环停滞看门狗，已在 main。跟 BLE 完全解耦，
-以后任何"卡死但看不见现场"的问题都能复用。面包屑本体白拿（64 字节在 RTC slow memory，
-不占 DRAM 堆）；看门狗要付 3KB 常驻栈，所以跟着 Settings 里的 Debug 开关走。
-
-**"软复位不丢"这条已在 main 的固件上实测过**（2026-08-26）：`TRAIL MARK` 埋下
-`AB 11 1F FF`，RTS 硬复位之后开机回放原样吐出这四个字节、连 `next=4` 的下标都保住了。
-这个自证动作值得每次真开始查问题之前先做一遍——面包屑平时读出来全是零，
-工具坏了跟"没走到那一步"长得一模一样。
+Earlier observations of crashes at round 5 (largest heap 7668) attributed to OOM were likely this identical deinit hang masked by low-memory conditions.
 
 ---
 
-## 2026-09-30 复查：拆除顺序错了（分支 `review/ble-leak`，未上机）
+## Incidental Finding: GATTS App Slot Leak (Genuine Bug, but Not the Cause of the Hang)
 
-对照框架（arduino-esp32 2.0.17 / IDF v4.4.7 `38eeba213a`）源码重读了一遍：
+Within the upstream library, `createApp()` executes `esp_ble_gatts_app_register(m_appId++)`, yet **the GATTS layer never unregisters applications** (unregistration existed only partially commented-out on the client side). Bluedroid provides limited GATTS app slots; repeated recreation will exhaust them.
 
-- **wip 的 `unregisterServerApp()` 是空操作。** 它在 `bleSuspended` 之后才调，此时
-  bluedroid 已被 `btExit()` disable，而 `esp_ble_gatts_app_unregister()` 第一行就是
-  `ESP_BLUEDROID_STATUS_CHECK(ENABLED)`（esp_gatts_api.c:63），直接返回 INVALID_STATE。
-  "面包屑证明注销成功"只证明了函数返回了。另外 `bta_gatts_deinit()` 会在每次 bluedroid
-  deinit 时清空 GATTS 控制块，所以跨 deinit 的"槽位耗尽"本来也不成立。
-- **真正可疑的是顺序。** `btExit()` 先 disable 了 bluedroid **和 controller**，之后
-  `BLEDevice::deinit()` 才去 `esp_bluedroid_deinit()`——在 controller 已停时拆 host 栈，
-  违反 IDF 规定的 disable→deinit(host)→disable→deinit(controller)。`esp_bluedroid_deinit`
-  对 BTC 任务是无限期 `future_await`；BTC 那边拆 HCI/BTU 线程 join 只给 1 秒、超时硬
-  `vTaskDelete`，被杀线程若持锁，后续 `osi_alarm_deinit()` 永久等锁。这条链是推断。
-- 修改：`btReleaseForOtherApps()` 先重新 enable controller，再按 IDF 顺序逐步拆，
-  每步面包屑 `B0..B5`（出错时插 `BE <err低字节>`）。
+The experimental branch introduced `BLEDevice::unregisterServerApp()` and restructured `btReleaseForOtherApps()` into three stages:
+**Unregister (stack alive) → deinit → delete objects (callbacks stopped)**. Even with this, hangs recurred at round 9, and breadcrumbs verified that unregistration had succeeded—confirming this was not the cause of the hang.
 
-判读：`B1` 有 `B2` 无 = 卡在 `esp_bluedroid_deinit`；`B3` 有 `B4` 无 = 卡在
-controller deinit（闭源 blob）。完整一轮应为 `B0 B1 B2 B3 B4 B5`，无 `BE`。
+⚠️ **Whether slot exhaustion occurs in production firmware remains unverified.** Production code traverses this path (`btReleaseForOtherApps()` clears `hidStarted` → next launch calls `btHidSetup()` → `createServer()` → `createApp(m_appId++)`), but whether `deinit(false)` via `esp_bluedroid_disable` implicitly reclaims registrations was never audited on hardware.
+
+---
+
+## Why Not Merge the Experimental Fix
+
+Adopting the memory fix requires vendoring the entire ~15k-line BLE library, burdened with an ~10% intermittent hang rate. **Net negative.** Current firmware policy: accept the known leak, monitor available heap via the Bluetooth UI menu (orange warning `<20KB restart soon`, red `<13KB restart before using`), prompting intentional reboots. On embedded microcontrollers, reboots are a valid operational strategy.
+
+## If Further Investigation is Pursued
+
+- **Dump `vTaskList()` during hangs**—directly inspect which task is blocked on what resource rather than speculating. A background watchdog timer in the main loop could print task states when execution stalls. `bctrail`'s stall watchdog already provides the skeleton; adding `vTaskList()` is straightforward.
+- **Or attach JTAG** to examine call stacks at the stall point (see Linux udev rules in [linux-setup.md](linux-setup.md)).
+- Do not use serial print instrumentation; it masks the failure.
+
+## Enduring Artifacts
+
+`src/bctrail.{h,cpp}`—Breadcrumb logging + main loop watchdog, now permanently part of the firmware. Completely decoupled from BLE, reusable for any obscure hang. Breadcrumbs incur zero heap cost (64 bytes in RTC slow memory, zero DRAM allocation); the stall watchdog requires 3KB stack space and is enabled conditionally via the Debug setting.
+
+**"Persistence across soft reboots" was verified empirically** on firmware (2026-08-26): writing `AB 11 1F FF` via `TRAIL MARK`, asserting RTS hard reset, and reading output on boot recovered all four bytes identically with index `next=4` preserved. Verify this tool behavior before debugging—an all-zero breadcrumb buffer looks identical to an untouched execution path.
+
+---
+
+## 2026-09-30 Re-audit: Incorrect Teardown Sequence
+
+Re-reading framework source code (arduino-esp32 2.0.17 / IDF v4.4.7 `38eeba213a`):
+
+- **The experimental `unregisterServerApp()` was a no-op.** It was invoked after `bleSuspended`, when Bluedroid had already been disabled via `btExit()`. The first line of `esp_ble_gatts_app_unregister()` asserts `ESP_BLUEDROID_STATUS_CHECK(ENABLED)` (esp_gatts_api.c:63), immediately returning `INVALID_STATE`. Breadcrumbs only proved the wrapper returned. Furthermore, `bta_gatts_deinit()` clears GATTS control blocks upon Bluedroid deinit, rendering cross-deinit "slot exhaustion" invalid.
+- **The true suspect is teardown sequencing.** `btExit()` disables Bluedroid **and the controller**, after which `BLEDevice::deinit()` invokes `esp_bluedroid_deinit()`. Tearing down host stacks while the controller is halted violates IDF's required lifecycle order: disable → deinit(host) → disable → deinit(controller). `esp_bluedroid_deinit` performs an indefinite `future_await` on the BTC task; BTC allows only 1 second to join HCI/BTU threads before forcefully executing `vTaskDelete`. If terminated threads held mutexes, subsequent `osi_alarm_deinit()` blocks permanently. (This sequence is a deduction).
+- Revision proposal: `btReleaseForOtherApps()` should re-enable the controller, then tear down strictly per IDF order, tracking each step via breadcrumbs `B0..B5` (inserting `BE <err_byte>` on failure).
+
+Interpretation: `B1` present, `B2` absent = stalled in `esp_bluedroid_deinit`; `B3` present, `B4` absent = stalled in controller deinit (closed-source blob). A complete clean cycle is `B0 B1 B2 B3 B4 B5` with zero `BE` markers.

@@ -1,29 +1,31 @@
-# 文字表盘 (QlockTwo) 取词测试台
+**English** | [简体中文](README.zh-CN.md)
 
-`src/clock.cpp` 里的极简文字表盘（QlockTwo 风格矩阵）将时间按 5 分钟取整并组合英文单词高亮。
+# Text Clock Face (QlockTwo) Word Selection Testbed
 
-测试内容：
-1. **关键边界时刻测试**：
-   - 11:58 -> IT IS TWELVE O'CLOCK PM（正午 12:00 PM 边界）
-   - 23:58 -> IT IS TWELVE O'CLOCK AM（午夜 12:00 AM 边界）
+The minimalist text clock face (`src/clock.cpp`, QlockTwo-style matrix) rounds time to 5-minute intervals and highlights combinations of English words.
+
+Test coverage:
+1. **Critical boundary times**:
+   - 11:58 -> IT IS TWELVE O'CLOCK PM (Noon 12:00 PM boundary)
+   - 23:58 -> IT IS TWELVE O'CLOCK AM (Midnight 12:00 AM boundary)
    - 12:30 -> IT IS HALF PAST TWELVE PM
-   - 00:03 -> IT IS FIVE PAST TWELVE AM（四舍五入到 5 分钟）
+   - 00:03 -> IT IS FIVE PAST TWELVE AM (Rounded to 5 minutes)
    - 11:40 -> IT IS TWENTY TO TWELVE PM
    - 23:40 -> IT IS TWENTY TO TWELVE AM
    - 12:45 -> IT IS QUARTER TO ONE PM
    - 00:45 -> IT IS QUARTER TO ONE AM
-2. **12 档 5 分钟词组合状态机验证**：
-   - O'CLOCK / PAST / TO 的互斥性
-   - HALF / QUARTER / TWENTY / FIVE / TEN 的精确组合
-3. **24 小时 x 60 分钟（共 1440 组）全量遍历不变量验证**：
-   - AM / PM 严格互斥且正确对应目标小时
-   - 目标小时严格位于 1..12
-   - 句子语法组合严格有效
+2. **12-slot 5-minute word combination state machine verification**:
+   - Mutual exclusion of O'CLOCK / PAST / TO
+   - Precise combination of HALF / QUARTER / TWENTY / FIVE / TEN
+3. **24 hours x 60 minutes (1440 points) exhaustive traversal invariant verification**:
+   - AM / PM strictly mutually exclusive and correctly mapping to target hour
+   - Target hour strictly within 1..12
+   - Sentence syntax combination strictly valid
 
-## 运行方法
+## How to Run
 
 ```bash
 cd tools/clocktest && ./build.sh
-# 开启 AddressSanitizer:
+# Enable AddressSanitizer:
 SAN=1 ./build.sh
 ```

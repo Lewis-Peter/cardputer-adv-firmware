@@ -1,22 +1,20 @@
-# 电量/充电逻辑测试台
+**English** | [简体中文](README.zh-CN.md)
 
-`src/power_util.cpp` 里的充电判定和电量推算，**在真机上验证不了关键路径**：板子要插着
-USB 才能烧录和读串口，而这套逻辑最要紧的分支恰恰是"拔掉之后"和"充了一小时之后"。
-所以在这里用合成的电压+时间序列驱动那份真代码（不是抄一份，跟 `tools/uisim` 同一个原则）。
+# Battery / Charging Logic Testbed
+
+The charging detection and battery percentage estimation in `src/power_util.cpp` **cannot have their critical execution paths verified on the actual device**: the board must be plugged into USB to flash firmware and read serial output, but the most critical branches of this logic are precisely "after unplugging" and "after charging for one hour". Therefore, synthetic voltage and time series are used here to drive the real production code (not a copy, following the same principle as [tools/uisim](../uisim/README.md)).
+
+## How to Run
 
 ```bash
 cd tools/powertest && ./build.sh
 ```
 
-两个场景：
-1. 离电使用 → 插上充电一小时 → 拔掉。看推算值是否从离电实测值起步、按 ~0.5%/分 上涨，
-   拔掉后是否立刻回到实测。
-2. **开机时就已经插着电**——用户报的那个 bug。以前斜率法测不出这种情况（电压一直平在
-   恒压平台上，永远没有上升沿），会显示 "on battery" 且把 4.2V 查表当成 100%。
+## Test Scenarios
 
-`stubs/` 里只有两个替身：`M5Unified.h` 让测试能控制时钟(`g_fakeMs`)和电池电压(`g_fakeMv`)，
-`Preferences.h` 用一个全局变量当 NVS，这样能摆布"上次关机前存的电量"。
+1. Discharging on battery → plugged in and charging for one hour → unplugged. Verifies whether estimated percentage starts from the measured discharge value, increases at ~0.5%/min, and immediately falls back to real-time measurement upon unplugging.
+2. **Powered on while already plugged in**—a user-reported bug. Previously, the voltage-slope method could not detect this scenario (voltage remains flat on the constant-voltage charging plateau with no rising edge), erroneously reporting "on battery" and treating 4.2V lookup as 100%.
 
-> 这个测试台不是摆设：第一版实现把充电会话状态放在 `powerBatteryLevel()` 里，而它是调用方
-> 按需调的（屏幕不重绘就不调）。跑一遍就看出推算值永远停在基准上不动——真机上盯着看
-> 根本发现不了，因为顶栏一直在重绘。状态因此被挪进了固定节奏的 `powerUpdate()`。
+`stubs/` provides only two mocks: `M5Unified.h` allowing tests to control the clock (`g_fakeMs`) and battery voltage (`g_fakeMv`), and `Preferences.h` using a global variable as NVS to manipulate "battery percentage saved before last shutdown".
+
+> This testbed is essential: the first implementation stored charging session state inside `powerBatteryLevel()`, which is called on-demand by callers (only when the screen redraws). Running this testbed immediately revealed that estimated values remained stuck at the baseline—something impossible to catch by watching the real device because the top status bar redraws continuously. The state was subsequently moved into the periodic `powerUpdate()`.

@@ -1,17 +1,19 @@
-# Linux 上从零把工具链跑通
+**English** | [简体中文](linux-setup.zh-CN.md)
 
-    README 的"烧录"一节在 macOS 上够用，但在 Linux（尤其 Arch）上会卡在两个地方，
-    而且两个的报错都指向错误的方向。这篇记录实际踩过并验证过的过程。
+# Setting Up the Toolchain from Scratch on Linux
 
-实测环境：Arch Linux / kernel 7.1.8 / PlatformIO Core 6.1.19 / pipx 1.15.0。
-板子通过原生 USB-C 直连，枚举为 `303a:1001 Espressif USB JTAG/serial debug unit`。
+    While the flashing section of the main README is sufficient for macOS, Linux environments
+    (especially Arch Linux) encounter two major setup hurdles whose error messages point in misleading directions.
+    This document records the exact issues and verified solutions.
+
+Test environment: Arch Linux / kernel 7.1.8 / PlatformIO Core 6.1.19 / pipx 1.15.0.
+Hardware connected directly via native USB-C, enumerating as `303a:1001 Espressif USB JTAG/serial debug unit`.
 
 ---
 
-## 坑 1：pipx 装的 PlatformIO 没有 pip，装不上 esptool
+## Issue 1: PlatformIO Installed via pipx Lacks pip, Breaking esptool Installation
 
-README 让你 `pipx install platformio`。装完 `pio --version` 正常，但第一次 `pio run`
-拉工具链时会在 `tool-esptoolpy` 上炸掉：
+[README.md](../README.md) suggests running `pipx install platformio`. While `pio --version` succeeds, the initial `pio run` command fails when installing `tool-esptoolpy`:
 
 ```
 Tool Manager: Installing platformio/tool-esptoolpy @ ~2.41100.0
@@ -25,54 +27,48 @@ sudo apt install python3-dev libffi-dev libssl-dev
 MissingPackageManifestError: Could not find one of 'package.json' manifest files in the package
 ```
 
-**这两条提示都是误导。**
+**Both diagnostic messages are misleading:**
 
-- `sudo apt install python3-dev ...` —— Arch 上根本没有 apt，而且就算在 Debian 上装了
-  这三个包也修不好，因为真正的问题是下一行。
-- `MissingPackageManifestError` 是**后果不是原因**：PlatformIO 解包 esptool 后要用 pip
-  装它的 Python 依赖，pip 不存在 → 安装中断 → `~/.platformio/packages/tool-esptoolpy/`
-  留下一个没有 `package.json` 的半成品目录 → 下次再跑直接报清单缺失。
+- `sudo apt install python3-dev ...` — Arch does not use apt, and even on Debian installing these packages does not resolve the issue, because the true problem is the line preceding it.
+- `MissingPackageManifestError` is a **symptom, not the cause**: after extracting esptool, PlatformIO relies on pip to install Python dependencies. Without pip, installation terminates prematurely, leaving a corrupted directory in `~/.platformio/packages/tool-esptoolpy/` missing `package.json`. Subsequent runs immediately fail on the missing manifest.
 
-根因是 pipx 从某个版本起**不再往应用 venv 里放 pip**（用共享的那份），而 PlatformIO
-把 `python -m pip` 当成能用的东西。
+The root cause is that recent versions of pipx no longer install pip into application virtual environments, whereas PlatformIO expects `python -m pip` to be functional.
 
-### 修
+### Fix
 
 ```bash
-# 1. 给 PlatformIO 的 venv 补上 pip
+# 1. Supply pip to PlatformIO's virtual environment
 ~/.local/share/pipx/venvs/platformio/bin/python -m ensurepip --upgrade
 
-# 2. 删掉上一次留下的半成品，否则 PlatformIO 认为它已装好、不会重装
+# 2. Remove the corrupted partial installation directory, otherwise PlatformIO will assume it is valid
 rm -rf ~/.platformio/packages/tool-esptoolpy
 
-# 3. 重新编译，这次会完整装上
+# 3. Re-run compilation; packages will install completely
 pio run
 ```
 
-> 只做第 1 步不够——第 2 步是关键，那个残缺目录会一直让构建失败。
+> Step 1 alone is insufficient—Step 2 is crucial because the leftover incomplete directory will continuously break builds.
 
 ---
 
-## 坑 2：Arch 上没有 `dialout` 组，是 `uucp`
+## Issue 2: Arch Uses 'uucp' Group Instead of 'dialout'
 
-README 写的是 `sudo usermod -aG dialout $USER`。这条在 Debian/Ubuntu 上对，但
-**Arch 系没有 `dialout` 组**，串口节点属于 `uucp`：
+[README.md](../README.md) recommends `sudo usermod -aG dialout $USER`. While accurate for Debian/Ubuntu, **Arch Linux has no `dialout` group**; serial device nodes belong to `uucp`:
 
 ```console
 $ getent group dialout
-                          # 空
+                          # Empty
 $ stat -c "%U:%G %a" /dev/ttyACM0
 root:uucp 660
 ```
 
-### 修
+### Fix
 
 ```bash
-sudo usermod -aG uucp $USER      # 重新登录后生效
+sudo usermod -aG uucp $USER      # Takes effect upon re-login
 ```
 
-不想重新登录（比如正在一个远程会话里）可以临时切组。注意 Arch 的 shadow 包**不带 `sg`**，
-只有 `newgrp`，而它是交互式的，得从 stdin 喂命令：
+To execute commands without re-logging (such as in an active SSH session), switch groups temporarily. Note that Arch's shadow package does not include `sg`; use `newgrp` via stdin:
 
 ```bash
 newgrp uucp <<'EOF'
@@ -80,19 +76,19 @@ pio run -t upload
 EOF
 ```
 
-### 想用内置 JTAG 调试再加一条 udev 规则
+### Optional udev Rule for Built-in JTAG Debugging
 
 ```
 SUBSYSTEM=="usb", ATTR{idVendor}=="303a", MODE="0660", GROUP="uucp", TAG+="uaccess"
 ```
 
-（README 里那条写的是 `GROUP="plugdev"`，Arch 上同样不存在这个组。）
+(The README rule specifies `GROUP="plugdev"`, which also does not exist on standard Arch systems.)
 
 ---
 
-## 验证：跑通之后应该看到什么
+## Verification: What a Working Setup Looks Like
 
-两个坑都填掉之后，完整链路（编译 → 烧录 → 启动 → 截图）实测如下。
+Once both hurdles are resolved, the complete workflow (compile → flash → boot → screenshot) executes as follows:
 
 ```console
 $ pio run
@@ -101,7 +97,7 @@ Flash: [=======   ]  74.6% (used 2492669 bytes from 3342336 bytes)
 ========================= [SUCCESS] Took 144.16 seconds =========================
 ```
 
-首次编译 144 秒（含下载 framework-arduinoespressif32 和各个库），之后增量快得多。
+The initial build takes ~144 seconds (downloading framework-arduinoespressif32 and dependencies); subsequent incremental builds are significantly faster.
 
 ```console
 $ pio run -t upload
@@ -112,106 +108,87 @@ Hash of data verified.
 
 ```console
 $ python3 tools/shot.py
-shot.png  (720x405, 原始 240x135)
+shot.png  (720x405, raw 240x135)
 ```
 
 ---
 
-## 顺手更正两处 README 的说法
+## Correcting Two Statements from the README
 
-**串口截屏不需要"十几秒"。** README 说"整屏 RGB565 hex 化之后约 130KB，115200 波特下
-十几秒"。实测 **131,581 字节只花 1.3 秒**：
+**Serial screenshots do not require "tens of seconds".** Early documentation estimated that transferring ~130KB of hex-encoded RGB565 over 115200 baud would take tens of seconds. In practice, **131,581 bytes transfer in only 1.3 seconds**:
 
 ```
-总字节 131581, 行数 138, 耗时 1.3s
+Total bytes: 131581, Lines: 138, Duration: 1.3s
 ```
 
-因为板子走的是**原生 USB CDC**，`monitor_speed = 115200` 只是给串口 API 的一个形式参数，
-实际传输跑在 USB 全速链路上，不受这个数字约束。烧录那 1501 kbit/s 也是同理。
+Because the hardware uses **native USB CDC**, `monitor_speed = 115200` is merely a formal configuration parameter for serial terminal APIs. The physical link operates at native USB Full-Speed bandwidth unconstrained by baud settings. The 1501 kbit/s flashing speed functions on the same principle.
 
-**`shot.py` 偶发"只收到 0/? 行"不是 DTR 的问题。** 一开始怀疑是 `serial.Serial(port, ...)`
-这种构造即打开的写法没设好 DTR/RTS，做了 A/B 对照：
+**Intermittent "received 0/? lines" in `shot.py` is not a DTR issue.** Initial suspicion fell on DTR/RTS states when opening ports via `serial.Serial(port, ...)`. An A/B test was conducted:
 
-| 打开方式 | 打开后状态 | 结果 |
+| Open Method | State After Open | Result |
 |---|---|---|
-| `serial.Serial('/dev/ttyACM0', 115200, timeout=0.5)` | `dtr=True rts=True` | ✅ 正常 |
-| 先设 `dtr=True rts=False` 再 `open()` | `dtr=True rts=False` | ✅ 正常 |
+| `serial.Serial('/dev/ttyACM0', 115200, timeout=0.5)` | `dtr=True rts=True` | ✅ OK |
+| Pre-set `dtr=True rts=False` then `open()` | `dtr=True rts=False` | ✅ OK |
 
-两种都能通，**DTR 无关**。实际触发条件是**前一个进程刚占用过端口就立刻再开**——
-间隔一两秒重试即可。写脚本连续截图时中间留点间隔。
-
----
-
-## 坑 3：三个桌面测试台原来只能在 Mac 上跑
-
-`tools/odidtest` / `tools/powertest` / `tools/uisim` 的 `build.sh` 里编译器写死成
-`/usr/bin/clang++`，uisim 还写死了 `SDL=$(brew --prefix sdl2)`——Linux 上三个都是
-第一行就 `No such file or directory`。
-
-### 修（已合入）
-
-编译器改成 `: "${CXX:=c++}"`，SDL2 改成先试 `pkg-config sdl2`、没有再回退 brew。
-现在两个平台都能直接跑：
-
-```bash
-sudo pacman -S sdl2            # Arch；Debian 系是 libsdl2-dev
-cd tools/odidtest  && ./build.sh    # Remote ID 解码器，40+ 用例
-cd tools/powertest && ./build.sh    # 充电判定/电量推算，两个场景
-cd tools/irtest    && ./build.sh    # 红外编码器，8 组用例（SAN=1 可开 sanitizer）
-cd tools/uisim     && ./build.sh    # 渲染 25 张页面 PNG 到 out/
-```
-
-uisim 还需要 `.pio/libdeps/` 里的 M5GFX 和 ArduinoJson，所以**得先成功 `pio run` 一次**；
-另外 `router.cpp` / `sats.cpp` 都 `#include "secrets.h"`，得先
-`cp src/secrets.h.example src/secrets.h`。⚠️ 值大多可以留空，但 `N2YO_API_KEY`
-要填个非空占位串（比如 `"SIMULATOR"`）——Sats 页在取数之前就先判它空不空，
-留空的话那一页只会渲出 "no N2YO key in secrets.h"。
-
-### 附赠：Linux 上 ASan 能用
-
-`odidtest/build.sh` 里原本记着"加 `-fsanitize=address` 会让程序空转卡死，所以不开"——
-那是 Darwin 27 特有的问题。Linux + g++ 下完全正常，全部用例通过、零报错。所以加了个开关：
-
-```bash
-SAN=1 ./build.sh       # 开 address + undefined
-```
-
-解析器是按外来字节算偏移的，越界读是这类代码最典型的坑，在 Linux 上改 `odid.cpp` 时
-建议一直带着这个开关跑。
-
-### 另：`uisim` 也栽在同一件事上
-
-跟下面 powertest 那条一模一样的毛病：`260b34e` / `0672c6d` 给 `router.cpp` 加了
-`trafClient.stop()` 和 `trafHttp.setReuse(false)`，`tools/uisim/stubs/` 里的假
-`WiFiClient` / `HTTPClient` 没跟上，uisim 从此**编不过**——而它不在 CI 里，
-所以只有下次想用它的人才会发现。`d7325cf` 引入 `tls_ca.cpp` 之后又多一条：
-那个根证书符号是链接器从 `data/cert/` 嵌进 flash 的，桌面上根本不存在。
-
-已经补齐（`stop()` / `setReuse()` / `tlsUseCaBundle()` / `tlsClockReady()`）。
-**以后在 `src/` 里用一个新的 Arduino API，顺手 `cd tools/uisim && ./build.sh` 一下**——
-它编的是同一份 `src/`，几秒钟就能知道桩有没有掉队。
-
-### 另：`powertest` 曾经链接失败
-
-`824d639` 把 `power_util.cpp` 改成调 `globals.h` 的 `loadUChar`/`saveUChar` 之后，
-powertest 的桩没跟上，`undefined reference` 了两周没人发现（它不在 CI 里）。已在
-`tools/powertest/main.cpp` 里补上桩。**以后再动 `globals.h` 的 NVS helper，记得跟着补。**
+Both methods work consistently; **DTR is not the cause**. The condition actually occurs when **a new connection opens immediately after a prior process releases the port**—waiting 1–2 seconds before reconnecting avoids this issue. Add slight pauses when scripting consecutive screen captures.
 
 ---
 
-## 排错速查
+## Issue 3: Desktop Testbeds Originally Hardcoded for macOS
 
-| 症状 | 多半是 |
+`build.sh` scripts across `tools/odidtest`, `tools/powertest`, and `tools/uisim` originally hardcoded compilers to `/usr/bin/clang++`, and uisim hardcoded `SDL=$(brew --prefix sdl2)`. On Linux, all three aborted immediately with `No such file or directory`.
+
+### Fix (Merged)
+
+Compilers now default to `: "${CXX:=c++}"`, and SDL2 resolution checks `pkg-config sdl2` first before falling back to brew. Both platforms are fully supported:
+
+```bash
+sudo pacman -S sdl2            # Arch; Debian systems use libsdl2-dev
+cd tools/odidtest  && ./build.sh    # Remote ID decoder, 40+ tests
+cd tools/powertest && ./build.sh    # Charging detection / battery math
+cd tools/irtest    && ./build.sh    # IR encoder, 8 test suites (SAN=1 enables sanitizers)
+cd tools/uisim     && ./build.sh    # Render 25 page PNGs to out/
+```
+
+uisim requires M5GFX and ArduinoJson from `.pio/libdeps/`, meaning **`pio run` must complete successfully at least once beforehand**.
+Additionally, both `router.cpp` and `sats.cpp` `#include "secrets.h"`, requiring `cp src/secrets.h.example src/secrets.h`. ⚠️ While most keys may remain blank, `N2YO_API_KEY` must contain a non-empty placeholder string (e.g. `"SIMULATOR"`)—the Sats view checks for key presence before querying and will render only "no N2YO key in secrets.h" if empty.
+
+### Note: ASan Works on Linux
+
+`odidtest/build.sh` previously noted that `-fsanitize=address` caused hangs; that issue was specific to legacy configurations on other platforms. Under Linux + g++, all test cases pass with zero errors with ASan enabled:
+
+```bash
+SAN=1 ./build.sh       # Enables address + undefined sanitizers
+```
+
+Since the decoder calculates field offsets from arbitrary external payloads, out-of-bounds reads are common hazards. Running with sanitizers enabled when modifying `odid.cpp` on Linux is strongly recommended.
+
+### Note: uisim Stub Drift
+
+Similar to powertest below: commits `260b34e` / `0672c6d` added `trafClient.stop()` and `trafHttp.setReuse(false)` to `router.cpp`, but mock implementations in `tools/uisim/stubs/` were not updated simultaneously, leaving uisim broken until someone next ran it locally. Commit `d7325cf` introduced `tls_ca.cpp`, requiring a certificate bundle symbol embedded via flash linking that does not exist in desktop environments.
+
+These mocks have been synchronized (`stop()`, `setReuse()`, `tlsUseCaBundle()`, `tlsClockReady()`).
+**Whenever introducing new Arduino APIs in `src/`, run `cd tools/uisim && ./build.sh`**—because it compiles against the same `src/` codebase, it catches outdated mocks in seconds.
+
+### Note: powertest Stub Drift
+
+When commit `824d639` changed `power_util.cpp` to call `loadUChar`/`saveUChar` in `globals.h`, powertest stubs lagged behind, generating `undefined reference` link errors. Stubs have been added in `tools/powertest/main.cpp`. **Remember to update mocks whenever changing NVS helpers in `globals.h`**.
+
+---
+
+## Troubleshooting Cheat Sheet
+
+| Symptom | Probable Cause |
 |---|---|
-| `No module named pip` / `MissingPackageManifestError` | 坑 1，且必须连带删掉 `~/.platformio/packages/tool-esptoolpy` |
-| `Permission denied: '/dev/ttyACM0'` | 坑 2，`uucp` 不是 `dialout` |
-| `/dev/ttyACM*` 压根不出现 | 先 `lsusb \| grep 303a` 确认板子枚举了；有设备但无节点才去查 `cdc_acm` |
-| `sg: command not found` | Arch 的 shadow 不带 `sg`，用 `newgrp` + stdin |
-| 串口读到 0 字节但设备没坏 | 固件平时不主动打日志，发 `HELP` 试探才有输出 |
-| 截图 0 行 | 端口刚被占用过，隔一两秒重试 |
-| esptool 连不上 / 烧录卡住 | 按住 G0 再插 USB（见 README），固件开机崩溃时 USB CDC 起不来 |
-| `build.sh: /usr/bin/clang++: No such file` | 坑 3，拉一下最新的 build.sh |
-| uisim 报找不到 M5GFX / ArduinoJson | 先成功跑一次 `pio run`，它才会把 libdeps 拉下来 |
-| uisim 报 `secrets.h: No such file` | `cp src/secrets.h.example src/secrets.h`，它在 .gitignore 里 |
-| uisim 报 `WiFiClient has no member named 'stop'` 之类 | `src/` 用了新的 Arduino API 但 `stubs/` 没跟上，见坑 3 |
-| powertest `undefined reference to loadUChar` | `globals.h` 的 NVS helper 变了但桩没跟上，见坑 3 末尾 |
+| `No module named pip` / `MissingPackageManifestError` | Issue 1; must also delete `~/.platformio/packages/tool-esptoolpy` |
+| `Permission denied: '/dev/ttyACM0'` | Issue 2; user belongs to `uucp`, not `dialout` |
+| `/dev/ttyACM*` device node does not appear | Run `lsusb \| grep 303a` to verify board enumeration; check `cdc_acm` driver if device exists without node |
+| `sg: command not found` | Arch shadow package lacks `sg`; use `newgrp` via stdin |
+| Zero bytes read over serial on functional hardware | Firmware suppresses continuous logs; send `HELP` to trigger output |
+| Screenshot returns 0 lines | Port was recently released by another process; retry after 1–2 seconds |
+| esptool fails to connect / flashing hangs | Hold G0 while plugging in USB (see [README.md](../README.md)); USB CDC cannot initialize if firmware crashes during boot |
+| `build.sh: /usr/bin/clang++: No such file` | Issue 3; pull latest build.sh |
+| uisim cannot find M5GFX / ArduinoJson | Run `pio run` once first to fetch dependencies into `.pio/libdeps` |
+| uisim reports `secrets.h: No such file` | Run `cp src/secrets.h.example src/secrets.h` (file is gitignored) |
+| uisim reports `WiFiClient has no member named 'stop'` | `src/` adopted new Arduino APIs not yet mirrored in `stubs/`; see Issue 3 |
+| powertest reports `undefined reference to loadUChar` | `globals.h` NVS helpers changed without updating mocks; see Issue 3 |

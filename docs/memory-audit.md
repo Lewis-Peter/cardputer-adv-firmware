@@ -1,236 +1,193 @@
-# 内存 / 资源泄漏审计（2026-09-02）
+**English** | [简体中文](memory-audit.zh-CN.md)
 
-    结论先放这儿：**查出两处真泄漏，都在 chat.cpp 和 bt.cpp，已修**。
-    其余按类逐项过了一遍，没有发现别的泄漏。
-    另外加了 `tools/memsweep.py`——因为读代码只能证明"有人写了释放"，
-    证明不了"释放干净了"，那件事只有在板子上量才算数。
+# Memory and Resource Leak Audit (2026-09-02)
+
+    Summary up front: **Two genuine leaks were identified in chat.cpp and bt.cpp; both have been resolved**.
+    All other modules were audited systematically by category; no other leaks were found.
+    Additionally, `tools/memsweep.py` was introduced—reading source code can only prove
+    "someone wrote deallocation code", but cannot prove "memory was fully reclaimed".
+    True verification requires empirical measurements on hardware.
 
 ---
 
-## 查了什么、怎么查的
+## Scope and Methodology
 
-不是"通读一遍找感觉"，是按**泄漏的几种成因**分类，每一类都有可机械检查的判据：
+Rather than skimming code subjectively, the audit classified leaks by **underlying mechanism**, establishing mechanical criteria for each:
 
-| 类别 | 判据 | 工具 |
+| Category | Criteria | Tool / Approach |
 |---|---|---|
-| 堆分配没配对 | `new`/`malloc` 与 `delete`/`free` 数量与路径 | grep + 逐处读 |
-| 任务/队列/信号量 | `xTaskCreate` 与 `vTaskDelete` | grep |
-| SD 文件句柄 | `SD.open` 与 `close` | grep + ESP32 `File` 是否 RAII |
-| HTTP 连接 | `http.begin` 与 `http.end`，以及 `end()` 到底关不关 socket | grep + 读 Arduino 源码语义 |
-| 射频状态 | `esp_wifi_set_promiscuous(true/false)`、`scanNetworks/scanDelete` | grep |
-| Sprite / 大缓存 | `createSprite` 与 `deleteSprite` | grep |
-| app 退出路径 | 每个 `xxxExit()` 是否都挂进 `cleanupApp()`；每条 `screen =` 是否都经过它 | grep 交叉核对 |
-| 缓冲越界 | 外来数据当下标写固定数组 | 逐个解析器读 + cppcheck |
-| 无界增长 | 循环里往 `String` 追加、输入框没有长度上限 | grep |
+| Unpaired heap allocations | Pairing and codepaths of `new`/`malloc` vs `delete`/`free` | grep + line-by-line review |
+| Tasks / Queues / Semaphores | `xTaskCreate` paired with `vTaskDelete` | grep |
+| SD file handles | `SD.open` vs `close`; ESP32 `File` RAII behavior | grep + ESP32 `File` RAII analysis |
+| HTTP connections | `http.begin` vs `http.end`, and whether `end()` closes underlying sockets | grep + reading Arduino framework source semantics |
+| RF / Radio states | Pairing of `esp_wifi_set_promiscuous(true/false)` and `scanNetworks/scanDelete` | grep |
+| Sprites / Large buffers | `createSprite` vs `deleteSprite` | grep |
+| App teardown paths | Whether every `xxxExit()` registers with `cleanupApp()`; verifying all `screen =` transitions | grep cross-reference |
+| Buffer overflows | External inputs indexing fixed-size arrays | Parser review + cppcheck |
+| Unbounded growth | Unbounded loops appending to `String`, text fields without character limits | grep |
 
-cppcheck（`--enable=all --inconclusive`，20k 行）**零 error、零 leak 告警**，
-只有一些 style 提示。所以下面的两处是靠读出来的，不是靠工具。
+cppcheck (`--enable=all --inconclusive`, ~20k lines) emitted **zero errors and zero leak warnings**, producing only minor style lints. The two identified leaks were found through manual structural review.
 
 ---
 
-## 发现 1（重）：`chat.cpp` 每问一次漏掉一整套 TLS 上下文
+## Finding 1 (Critical): `chat.cpp` Leaks Entire TLS Context per Query
 
-### 现象层面
+### Manifestation
 
-Chat 页每次提问都会永久少掉几十 KB 堆，而这块板子空闲堆总共才 70KB 出头。
+Each question asked on the Chat page permanently leaked tens of kilobytes of heap on a board with barely ~70KB of total free heap.
 
-### 两个原因叠在一起，缺一条都不会漏
+### Two Confounding Factors: Both Necessary for the Leak
 
-**① `vTaskDelete(nullptr)` 不跑 C++ 析构。** 它把整块栈回收掉，栈上对象的析构函数
-一个都不会执行。而 `chatWorker()` 的栈上恰好有三样带堆的东西：
+**1. `vTaskDelete(nullptr)` bypasses C++ destructors.** When terminating a FreeRTOS task, the stack is reclaimed immediately without executing destructors for stack-allocated objects. `chatWorker()` maintained three heap-bearing objects on its stack:
 
-    WiFiClientSecure client   析构里才 stop()，mbedTLS 收发缓冲是 16KB+4KB 那个量级
-    HTTPClient       http     析构里才 end()
-    String reply, err         回复最长 CHAT_REPLY_MAX，也是一块堆
+    WiFiClientSecure client   Releases via stop() only in destructor; mbedTLS buffers occupy 16KB+4KB
+    HTTPClient       http     Releases via end() only in destructor
+    String reply, err         Stores up to CHAT_REPLY_MAX, allocating dynamic heap buffers
 
-**② `http.end()` 顶不上。** `HTTPClient::disconnect()` 里有这么一条：
+**2. `http.end()` does not close persistent sockets.** `HTTPClient::disconnect()` implements the following branch:
 
 ```cpp
-if (_reuse && _canReuse) { /* tcp keep open for reuse */ }   // 根本不关 socket
+if (_reuse && _canReuse) { /* tcp keep open for reuse */ }   // Sockets remain open
 else                     { _client->stop(); }
 ```
 
-`_reuse` 默认就是 `true`，而 OpenAI 那类端点必然回 `Connection: keep-alive`，
-于是 `_canReuse` 也是 `true`——`end()` 走的是上面那条，socket 和 TLS 上下文原样留着。
+`_reuse` defaults to `true`. Endpoints like OpenAI invariably return `Connection: keep-alive`, setting `_canReuse` to `true`. Thus `end()` takes the keep-alive branch, leaving socket descriptors and TLS contexts intact.
 
-**这条项目里早就知道**：`router.cpp` 的 `trafficClose()` 顶上把这段原文抄下来了，
-因为 `/traffic` 那条常开流被它坑过（复用脏 socket 解出 "http 47" 这种不存在的状态码）。
-只是当时没意识到 chat.cpp 里有同一个问题——那边更隐蔽，因为它**连析构这条后路都没有**。
+This behavior was already recognized in `router.cpp`'s `trafficClose()`, which documented this exact upstream logic after persistent `/traffic` streams experienced socket reuse corruption. However, the identical issue in `chat.cpp` had gone unnoticed—and was exacerbated by the complete absence of destructor execution.
 
-### 修法：不补 `stop()`，改结构
+### Fix: Structural Refactoring Instead of Ad-Hoc `stop()`
 
-第一版补丁是在三处 `vTaskDelete` 前面各加一句 `client.stop()`。**撤掉了**——
-那是靠人记住，下次谁加一条提前返回就又漏了。
+An initial draft added explicit `client.stop()` before each `vTaskDelete`. This was discarded because relying on manual cleanup calls invites regressions whenever early return paths are added in the future.
 
-改成把正文拎成一个**会正常 return** 的函数：
+The implementation was refactored into a standard returning function:
 
 ```cpp
-static void chatWorkerBody() { ... 一律用 return ... }
+static void chatWorkerBody() { ... return statements only ... }
 
 static void chatWorker(void*) {
-  chatWorkerBody();          // 这里返回 = 栈上的 client / http / String 真的被析构了
+  chatWorkerBody();          // Returning here ensures stack objects (client / http / String) are properly destructed
   workerBusy.store(false, std::memory_order_relaxed);
   workerDone.store(true, std::memory_order_release);
-  vTaskDelete(nullptr);      // 全项目这个函数里唯一的一处
+  vTaskDelete(nullptr);      // Sole task termination call in the module
 }
 ```
 
-不是靠记住补一句，是让语言替我们保证。顺带把内存序也变强了：原来 release 之后
-还有析构要跑，现在 release 是真正的最后一步。
+By leveraging C++ language semantics, stack unwind guarantees clean destruction. Memory ordering was also hardened: release ordering now occurs as the true final step after all destructions complete.
 
 ---
 
-## 发现 2（轻）：`bt.cpp` 的 `new BLESecurity()` 从不 delete
+## Finding 2 (Minor): `bt.cpp` Never Deletes `new BLESecurity()`
 
-Arduino BLE 的示例一律写成 `new BLESecurity()` 且从不 `delete`。这个对象本身不持有
-任何东西——三个 setter 各自直接调 `esp_ble_gap_set_security_param()`，配置进的是协议栈，
-对象用完就没用了。改成栈对象即可。
+Standard Arduino BLE examples frequently instantiate `new BLESecurity()` without invoking `delete`. The object itself manages no dynamic resources—its three setters forward arguments directly to `esp_ble_gap_set_security_param()`, updating configuration within the Bluedroid stack. The wrapper object is useless once configured and was converted to a stack-allocated local instance.
 
-量级只有十几个字节，跟同一带那笔约 13KB 的 `BLEDevice::deinit()` 库泄漏没法比
-（那笔是 Arduino BLE 的已知行为、项目里有意接受的，见 `btReleaseForOtherApps()` 的注释），
-但白漏没有任何理由。
+While this leak was minor (~dozens of bytes) compared to the ~13KB permanent footprint of `BLEDevice::deinit()` (a documented upstream behavior accepted intentionally in `btReleaseForOtherApps()`), there was no reason to leave memory uncollected.
 
 ---
 
-## 查过、确认没问题的
+## Audited and Confirmed Clean
 
-- **app 退出路径**：15 个 `xxxExit()` 全部挂在 `cleanupApp()` 上（`btExit` 走
-  `isBleScreen()` 那条分支）。`` ` `` 退出和 BtnA 一键回菜单共用同一份清理，
-  串口 `MENU` 也走它。唯一不清理的是串口裸跳转 `GOTO`/`GNSSMAP`——那是**故意留的逃生口**
-  （正在 LoRa 抓包时想跳去看一眼别的页面），而且它每次都会往串口吼一行 `[jump]` 提醒。
-- **FreeRTOS 任务**：chat / radio / player 三个后台任务都能正常结束或被安全删除；
-  `bctrail` 的看门狗任务起了就不停，这是写在注释里的有意取舍（只在 Debug 开着时才起）。
-- **SD 文件句柄**：ESP32 的 `File` 是 `shared_ptr<VFSFileImpl>`，析构即 close，
-  RAII 兜着。代码里该显式 close 的地方也都 close 了。
-- **HTTP**：除 `router.cpp` 的 `trafHttp` 是全局（有显式 `trafficClose()`）外，
-  其余全是函数内的栈对象，正常返回时析构接管。
-- **射频状态**：`esp_wifi_set_promiscuous(true)` 与 `(false)` 处处配对；
-  `scanNetworks()` 与 `scanDelete()` 处处配对。
-- **Sprite**：只有地图那块 48KB（+8bpp 的 24KB 降级档），`gnssMapExit()` 里
-  `deleteSprite()`，且挂在 `cleanupApp` 上。申请失败时 `_img` 是空指针，不会半吊子泄漏。
-- **缓冲越界**：`wsniff.cpp` 那几个 802.11 解析分支逐条核过——
-  `ssid[33]` 配 `slen <= 32`、`ridSubCount[16]` 配 `fsub = (fc>>4)&0xF`、
-  `body[24]/body[32]` 和 `ridOdidRaw[100]` 都先夹后 `memcpy`，IE 遍历有
-  `off + 2 + tlen > len` 的护栏。`odid.cpp` 另有 `tools/odidtest` 带 ASan 的截断遍历用例。
-- **无界增长**：所有文本输入框都有长度上限（算式 48 / 聊天 200 / Wi-Fi 密码 63 /
-  热点密码 32 / 换算 16 / 电台 URL 120 / LoRa 消息 64 / 探针目标 40）；
-  两处从网络流里攒 `String` 的地方（`clashLine` / `trafficPoll`）都有 400 字节的护栏。
+- **App Teardown Pathways**: All 15 `xxxExit()` hooks register cleanly with `cleanupApp()` (with `btExit` dispatched via `isBleScreen()`). Exiting via `` ` `` and BtnA main-menu resets share identical cleanup paths, as does serial `MENU`. The only pathway bypassing cleanup is raw serial jumps (`GOTO` / `GNSSMAP`), which serve as intentional debugging escape hatches and print explicit `[jump]` warnings over serial.
+- **FreeRTOS Tasks**: Background worker tasks for chat, radio, and player terminate or delete cleanly. The `bctrail` watchdog task runs continuously by design, enabled only when the Debug setting is active.
+- **SD File Handles**: ESP32's `File` wraps `shared_ptr<VFSFileImpl>`, closing files upon destruction via RAII. Explicit calls to `close()` are also present across file handlers.
+- **HTTP Connections**: Except for global `trafHttp` in `router.cpp` (managed via explicit `trafficClose()`), all HTTP instances reside on function stacks and destruct on return.
+- **Radio RF State**: `esp_wifi_set_promiscuous(true)` and `(false)` pair strictly; `scanNetworks()` and `scanDelete()` pair consistently.
+- **Sprites**: The sole large sprite allocation is the 48KB base map (+ 24KB 8bpp fallback) in GNSS, freed via `deleteSprite()` in `gnssMapExit()` wired to `cleanupApp()`. Failed allocations set `_img` to nullptr without leaving partial leaks.
+- **Buffer Overflow Protection**: 802.11 parsing branches in `wsniff.cpp` were validated against field constraints (`ssid[33]` bounds `slen <= 32`, `ridSubCount[16]` bounds `fsub = (fc>>4)&0xF`, `body[24]/body[32]` and `ridOdidRaw[100]` clamp lengths before `memcpy`, and IE loops enforce `off + 2 + tlen > len`). `odid.cpp` undergoes ASan-instrumented fuzzing in `tools/odidtest`.
+- **Unbounded Growth**: All interactive text buffers have fixed bounds (Calculator: 48, Chat: 200, Wi-Fi password: 63, Hotspot password: 32, Unit converter: 16, Radio URL: 120, LoRa message: 64, NetProbe target: 40). Streaming parsers accumulating `String` (`clashLine` / `trafficPoll`) enforce 400-byte bounds.
 
 ---
 
-## `tools/memsweep.py`：把"审计"变成能重复做的测量
+## `tools/memsweep.py`: Turning Audits into Reproducible Measurements
 
-读代码有个天花板：它能证明"有人写了释放"，证明不了"释放干净了"。
-真正的证据只有一个——进去、退出、看堆有没有回到原位。
+Static analysis has an upper bound: it proves that deallocation statements exist, not that they execute completely. The definitive proof is entering an app, exiting it, and verifying whether free heap returns to baseline.
 
-这个项目已经有全部原语（`docs/serial-sweep.md` 那套），缺的只是把它们串起来：
+Leveraging serial automation primitives from [serial-sweep.md](serial-sweep.md), `tools/memsweep.py` automates this process:
 
 ```bash
-python3 tools/memsweep.py                 # 每个 app 进出 3 轮，报净堆变化
+python3 tools/memsweep.py                 # Cycle each app 3 times, reporting net heap deltas
 python3 tools/memsweep.py --rounds 5 --only Quake IR
-python3 tools/memsweep.py --selftest      # 不用插板子，拿假设备验一遍工具本身
+python3 tools/memsweep.py --selftest      # Verify script logic against a synthetic mock device
 ```
 
-判定逻辑的关键是**只看第 1 轮之后**：第一次进去建缓存、连一次网、装个驱动，
-都是一次性的，天然会掉一块又不再掉；只有"每一轮都掉"才是泄漏。
-自检里专门埋了这两种形态各一个（`Leaky` 每轮漏 2KB / `Weather` 第一轮一次性掉 48KB），
-要求前者被抓出来、后者不被误报。
+The evaluation focuses on **rounds subsequent to round 1**: initial launches legitimately establish caches, initialize drivers, and establish buffers, causing a one-time drop that never recurs. True leaks manifest as continuous drops across every cycle. The built-in self-test exercises both behaviors (`Leaky` leaking 2KB/round vs `Weather` dropping 48KB once on round 1).
 
-⚠️ 默认跳过 BLE 三件套、Ducky、Hotspot、Settings，理由写在脚本里（简单说：
-它们的堆变化不是泄漏，是有意的行为或者不该让脚本乱按的东西）。
+⚠️ BLE modules, USB Ducky, Hotspot, and Settings are skipped by default for operational reasons documented inside the script.
 
 ---
 
-## 后续：`RAMLOG`——补上"开机那一半"
+## Follow-up: `RAMLOG` — Profiling the Boot Phase
 
-这份审计查的是**运行期**：进一个 app、退出来，还回来没有。它答不了另外半个问题——
-**开机走完之后那些内存是被哪一步吃掉的**。而这半个问题是有账的：README 记着静态 RAM
-四周内从 94,876 涨到 119,420（+24.5KB），当时查不出花在哪，因为手上只有两种数：
-`pio run` 末尾的一个总数，和 `STAT`/`MEMCAP` 的"此刻还剩多少"。两种都是快照，
-而"是谁吃的"是个**差值**问题。
+This audit originally focused on **runtime lifecycle**: verifying whether entering and exiting apps restored heap. It did not address the boot sequence: **which boot stages consume memory during startup**. As documented in [README.md](../README.md), static RAM usage grew by +24.5KB over four weeks (from 94,876 to 119,420 bytes). Pinpointing the exact consumers was impossible with only `pio run` build summaries and runtime `STAT` snapshots, because identifying allocations requires differential measurements.
 
-所以补了 `src/ram_profile.{h,cpp}` + 串口 `RAMLOG`：`setup()` 里 11 个阶段各打一枪，
-Wi-Fi 真正连上时再补一枪，打出来是一张带正负号的表。
+To address this, `src/ram_profile.{h,cpp}` was added along with the `RAMLOG` serial command: recording memory deltas across 11 stages in `setup()`, with an additional sample once Wi-Fi connects.
 
-两个不太显然的地方：
+Design considerations:
 
-- **先攒着，不当场打。** 参考的做法（Bruce 固件的 `ram_profile`）是每个阶段直接
-  `Serial.printf`。这块板子上那样会丢掉最想看的部分：走的是原生 USB CDC，
-  `Serial.begin()` 排在 `setup()` 很靠后，而 `M5.begin()` 和主画布那 64KB 都在它之前，
-  当场打的话这两步**没有任何地方收得到**。改成记进一个 16 格的静态数组，随时 dump。
-- **满了丢新的，不挤掉旧的。** 开头那几步才是这套东西存在的理由。
+- **Buffered telemetry rather than immediate prints.** Directly calling `Serial.printf` at each stage (as done in some third-party firmware) misses critical early boot stages: under native USB CDC, `Serial.begin()` occurs late in `setup()`, after `M5.begin()` and the 64KB display canvas are already allocated. Storing records in a 16-element static array allows dumping telemetry on demand.
+- **Old entries are preserved when the buffer fills.** The earliest boot steps are the primary justification for the tool's existence.
 
-代价是 320 字节静态 RAM（16 × 20）。这个项目对静态 RAM 很敏感，但换来的正是当初
-记下 94,876→119,420 时缺的那样东西，所以也**没做成编译开关**——要重烧一次才能用的
-诊断等于没有。
+Memory footprint is 320 bytes of static RAM (16 × 20 bytes). Because diagnostics requiring re-flashing are rarely utilized, this profiling mechanism remains permanently enabled rather than behind a compile-time flag.
 
-`tools/ramtest/` 是它的桌面试跑台（编的是同一份 `src/ram_profile.cpp`，只把底下的
-`heap_caps_*` 换成一串编好的数），验的是表本身：列对齐、Δ 的正负号、16 格灌满后的行为。
-另外 uisim 的语法检查给这个文件单开了 `-Werror=format`——整段输出都是格式串，而格式串
-跟参数类型对不上在板子上是**静默**的：照样烧得进去，只是打出来的数是垃圾。
+`tools/ramtest/` provides a host-side harness compiling the same `src/ram_profile.cpp` against mock heap counters, validating column formatting, delta signs, and overflow behavior. Host compilation enforces `-Werror=format` to prevent silent printf type mismatches.
 
 ---
 
-## 还没验的
+## Remaining Verification Items
 
-- **本次两处修复都没有在硬件上跑过。** `chat.cpp` 那处的正确验证方式是：
-  修前修后各连问 5 次，每次之间敲 `STAT` 记 `heap`。修之前应该看到阶梯状下降，
-  修之后应该基本回到原位。`memsweep.py` 量不到它——那个脚本只进出 app 不发问题。
-- **`memsweep.py` 只跑过自检**（假设备），没对着真板子跑过。第一次用建议加 `--verbose`
-  先看几行收发对不对。
-- **`RAMLOG` 的表在桌面上验过（`tools/ramtest`），但那串数字是编的。** 真机第一次跑出来的
-  重点看两行：`canvas` 那行的 Δ 应该接近 -64,800（240×135×2），对不上说明打点位置错了；
-  `wifi up` 那行应该接近 -36,000（README 里实测的协议栈常驻量）。这两个数都有独立来源，
-  正好互相印证。
+- **The two bug fixes were verified structurally but require physical hardware confirmation.** Validating `chat.cpp` requires querying the LLM 5 times while sampling heap via serial `STAT`; heap should return to baseline rather than stepping down. `memsweep.py` does not test this path because it enters views without sending chat prompts.
+- **`memsweep.py` has been verified via synthetic self-tests**, but full end-to-end runs on hardware should be observed with `--verbose`.
+- **`RAMLOG` was validated via desktop test harness (`tools/ramtest`) using synthetic fixtures.** Hardware baselines should confirm: the `canvas` step delta should register near -64,800 bytes (240×135×2), and `wifi up` should reflect ~ -36,000 bytes (measured network stack footprint per [README.md](../README.md)).
 
 ---
 
-## CanvasLease 推广（2026-09）
+## CanvasLease Adoption (2026-09)
 
-### 背景与契约规则
+### Background and Architectural Invariants
 
-全屏画布 `cv` 独占 64.8KB（240×135×2 DMA 连续内存）。ESP32-S3 无 PSRAM，mbedTLS 握手需两块约 16.7KB（合计 ~33KB）的连续堆缓冲。在运行一段时间堆碎片化后，握手往往因拿不到连续块而失败。`CanvasLease`（`src/globals.h`）通过 RAII 在 TLS 抓取期间将全屏画布临时释放，出作用域自动恢复。
+The full-screen canvas `cv` occupies 64.8KB (240×135×2 DMA contiguous memory). On an ESP32-S3 without PSRAM, mbedTLS handshakes require two contiguous heap buffers of ~16.7KB each (~33KB total). As heap fragmentation develops over runtime, TLS handshakes frequently fail due to contiguous block exhaustion. `CanvasLease` (`src/globals.h`) uses RAII to temporarily release the display canvas during TLS network fetches, restoring it automatically upon exiting scope.
 
-推广必须严格遵守四项铁律：
-1. **证书与客户端前置**：`WiFiClientSecure client; tlsUseCaBundle(client);` 必须在 lease 之前建好。`tlsUseCaBundle` 会 calloc 一块永不释放的证书索引（~484B），若在 lease 作用域内分配，会落在画布腾出的空洞里将其钉死，导致显存永久无法恢复。
-2. **逆序析构保证**：`CanvasLease` 必须声明在 `JsonDocument`、`filter` 等临时大对象之前。C++ 栈对象逆序析构，保证所有临时解析对象先释放干净，最后再向系统申请恢复画布。
-3. **作用域内禁止持久化分配**：lease 作用域内只准有"用完即放"的瞬态分配。要持久保留的结果（数据数组、String 错误信息、缓存等）必须在进入 lease 作用域前备好（预先分配、`reserve()` 容量或使用静态缓冲），否则新增内存会插在画布空洞内造成显存再分配失败。
-4. **渲染与并发安全**：确认抓取是在主线程同步执行（渲染自然暂停，无并发冲突）还是在后台任务中执行。若为主线程同步执行，需配合 `DeferredFetch` 在首帧渲染后触发，保证界面提示正常。
+Adopting this pattern requires adherence to four strict invariants:
+
+1. **Pre-instantiate Certificates and Clients**: `WiFiClientSecure client; tlsUseCaBundle(client);` must be constructed before acquiring the lease. `tlsUseCaBundle` allocates a permanent certificate index (~484 bytes) via `calloc`; allocating this inside the lease scope fragments the vacated canvas memory hole, permanently preventing canvas reallocation.
+2. **Reverse Destruction Order**: Declare `CanvasLease` prior to large temporary objects like `JsonDocument` or `filter`. C++ stack unwinding destroys objects in reverse order, ensuring parsing buffers are reclaimed before reallocating canvas memory.
+3. **No Persistent Allocations Inside Scope**: The lease scope must contain only transient, short-lived allocations. Persistent results (data arrays, error strings, caches) must be allocated, reserved, or statically assigned before entering the lease.
+4. **Rendering & Concurrency Safety**: Verify whether network requests execute synchronously on the main thread (rendering pauses naturally) or inside background tasks. For main-thread execution, coordinate with `DeferredFetch` to trigger requests after rendering initial UI prompts.
 
 ---
 
-### 各应用评估与改造明细
+### Application Evaluation and Migration Breakdown
 
-| 应用模块 | 数据源与协议 | 改造方案 | 安全性分析与设计决策 |
+| Module | Protocol & Source | Adaptation Pattern | Safety Analysis & Rationale |
 |---|---|---|---|
-| **src/quake.cpp** | USGS GeoJSON (HTTPS) | 在 `fetchQuakes()` 中应用 `CanvasLease` | **主线程同步**。`errMsg.reserve(96)` 与 client 前置；结果解析写入静态数组 `eqs[MAX_EQ]`；`filter` 与流式解析临时文档均逆序先于 lease 释放。 |
-| **src/okx.cpp** | OKX C2C + CoinGecko Fallback (双 HTTPS) | 单个 `CanvasLease` 覆盖主源与回退源两次握手全过程 | **主线程同步**。两次握手间无渲染，单个 lease 避免中间无意义的 64.8KB 显存恢复与再释放抖动，确保持续为第二次握手提供大块连续内存；client 在两次握手间显式 `client.stop()`；前置预留 `errMsg`、`okxErr`、`fbErr` 避免错误分支分配。 |
-| **src/typhoon.cpp** | JMA 防灾 JSON (多段 HTTPS) | `fetchList()` 应用 lease；`ensureDetail()` 用单个 lease 覆盖实况与预报两次握手 | **主线程同步**。`jmaGet` 改造为引用外部 client，避免反复分配证书索引；详情延迟加载在 400ms 防抖后执行；实况 specifications 与预报 forecast 在单次 lease 内连续完成，两次请求间显式 `client.stop()` 释放 TLS 缓冲；数据写入静态 `list` 与 `det`。 |
-| **src/adsb.cpp** | ADS-B 单机航线查询 (api.adsbdb.com, HTTPS) | 飞机列表走明文 HTTP 不动；在 `fetchRoute()` 中应用 `CanvasLease` | **主线程同步**。350ms 防抖后拉取航线；前置 `fetchErr.reserve(64)` 与 client；lease 包裹 `filter`/`doc`；航线结果填入栈对象并存入静态环形缓存 `rcache`。 |
-| **src/fx.cpp** | Frankfurter 外汇汇率 (HTTPS) | 在 `fetchFx()` 中应用 `CanvasLease` | **主线程同步**。前置分配 `pts` 结构体数组（~700B），前置 `errMsg.reserve(96)` 与 client；lease 声明于 `filter`/`doc` 之前；解析直接写入预备好的 `pts`。 |
-| **src/github.cpp** | GitHub 贡献图 (HTTPS) | 在 `fetchContrib()` 中应用 `CanvasLease` | **主线程同步**。前置 `errMsg.reserve(96)` 与 client；lease 包裹 `fetchJsonStreamArray`；流式回调解析入静态数组 `tmpCount`/`tmpLevel`，无动态内存驻留。 |
-| **src/chat.cpp** | LLM API (HTTPS) | **保持原状，不作修改** | Chat 拥有独立的后台 FreeRTOS Worker 任务与手动的 `canvasRelease()` / `canvasRestore()` 调度体系，涉及多线程并发交互，不适用简单的同步作用域 lease。 |
-| **其它模块** | 天气/路由器/地图瓦片/IP定位 (HTTP) | **不适用** | 均为明文 HTTP 请求，无 TLS 握手的 33KB 连续大缓冲压力，无需借用画布。 |
+| **src/quake.cpp** | USGS GeoJSON (HTTPS) | Wrap `fetchQuakes()` with `CanvasLease` | **Main-thread synchronous**. Pre-reserve `errMsg.reserve(96)` and client; parse into static array `eqs[MAX_EQ]`; `filter` and streaming docs unwind before lease destruction. |
+| **src/okx.cpp** | OKX C2C + CoinGecko Fallback (Dual HTTPS) | Single `CanvasLease` spanning primary and fallback requests | **Main-thread synchronous**. No rendering occurs between fallback attempts; a single lease avoids unnecessary 64.8KB deallocation/reallocation churn; client calls `client.stop()` between attempts; pre-reserves `errMsg`, `okxErr`, and `fbErr`. |
+| **src/typhoon.cpp** | JMA Disaster Prevention JSON (Multi-step HTTPS) | Lease in `fetchList()`; single lease across current conditions and forecast in `ensureDetail()` | **Main-thread synchronous**. Refactored `jmaGet` to accept external client reference, preventing repeated CA index allocations; details load after 400ms debounce; calls `client.stop()` between sub-requests; writes to static `list` and `det`. |
+| **src/adsb.cpp** | ADS-B Route Lookup (api.adsbdb.com, HTTPS) | Aircraft list uses plain HTTP (unmodified); lease applied in `fetchRoute()` | **Main-thread synchronous**. Routes fetched after 350ms selection debounce; pre-reserves `fetchErr.reserve(64)` and client; route records stored in static ring cache `rcache`. |
+| **src/fx.cpp** | Frankfurter Forex Rates (HTTPS) | Wrap `fetchFx()` with `CanvasLease` | **Main-thread synchronous**. Pre-allocates `pts` struct array (~700B), pre-reserves `errMsg.reserve(96)` and client; lease declared before `filter`/`doc`; parser writes directly into `pts`. |
+| **src/github.cpp** | GitHub Contributions (HTTPS) | Wrap `fetchContrib()` with `CanvasLease` | **Main-thread synchronous**. Pre-reserves `errMsg.reserve(96)` and client; lease wraps `fetchJsonStreamArray`; streaming callbacks populate static arrays `tmpCount`/`tmpLevel`. |
+| **src/chat.cpp** | LLM API (HTTPS) | **Unmodified** | Uses a dedicated FreeRTOS worker task with manual `canvasRelease()` / `canvasRestore()` coordination; multithreaded concurrency is unsuitable for synchronous scoped leases. |
+| **Other Modules** | Weather / Router / Map Tiles / IP Geolocation (HTTP) | **Not Applicable** | Plaintext HTTP requests without the 33KB contiguous TLS buffer requirement; canvas leasing is unnecessary. |
 
 ---
 
-### 真机验证检查清单
+### Hardware Verification Checklist
 
-在连接串口或开启屏幕底部 Debug Bar 的情况下，真机重点验证：
-1. **Quake 地震速报**：
-   - 进 Quake，敲 `STAT` 记录 `free heap` 与 `largest`；
-   - 按 `r` 触发重拉，观察抓取完成后 `STAT` 的 `largest` 是否恢复至抓取前水平；
-   - 切换数据源（`m`）拉取 2.5_day 较大 GeoJSON，验证流式解析下画布恢复无异常。
-2. **OKX 汇率**：
-   - 进入页面，验证 OKX 主源成功后画布正常恢复；
-   - 断网或在网关拦截 OKX 域名模拟 Fallback，验证连走两次握手后页面是否能正常渲染 CoinGecko 数据且显存不泄漏。
-3. **Typhoon 台风预警**：
-   - 进入页面，验证列表拉取后首屏正常推屏；
-   - 连续按 `;` 或 `.` 翻动台风，验证 400ms 防抖触发后，实况+预报两次握手完成后地图与详情能正确渲染，`largest` 恢复原位。
-4. **ADS-B 航线查询**：
-   - 进入 ADS-B 页面，等待明文飞机列表刷出；
-   - 按 `;` 或 `.` 切换选中飞机，350ms 后触发航线查询，观察航线起降机场代码与进度条是否正常显示，无白屏或断言崩溃。
-5. **FX 外汇走势**：
-   - 进页面查看走势图，按 `m` 切换 30d/90d 窗口，退出页面后核对 `pts` 释放是否彻底。
-6. **GitHub 贡献图**：
-   - 配置合法 `GITHUB_USER`，进入页面查看热力图加载，验证逐元素流式解析后画布按时恢复。
+Verify the following behaviors on hardware with serial logging or the on-screen Debug Bar active:
+
+1. **Quake View**:
+   - Enter Quake; issue `STAT` to note `free heap` and `largest`.
+   - Press `r` to trigger refresh; verify `largest` returns to baseline after fetch completes.
+   - Switch data source (`m`) to fetch the larger 2.5_day feed; verify smooth canvas restoration.
+2. **OKX Forex**:
+   - Enter view; verify canvas restores after primary OKX fetch.
+   - Simulate network failure to trigger fallback; verify CoinGecko fetch succeeds and canvas restores cleanly.
+3. **Typhoon Alerts**:
+   - Enter view; verify initial list renders correctly.
+   - Navigate items with `;` / `.`; verify debounce triggers both condition and forecast fetches, restoring canvas and baseline `largest`.
+4. **ADS-B Route Lookup**:
+   - Enter view and wait for aircraft list to populate.
+   - Navigate with `;` / `.`; verify route fetch triggers after 350ms debounce, rendering airport codes and progress bars without white screens or crashes.
+5. **FX Rates**:
+   - Enter view; switch between 30d/90d views via `m`; verify clean deallocation of `pts` upon exit.
+6. **GitHub Heatmap**:
+   - Configure a valid `GITHUB_USER`; verify heatmap renders and canvas restores following streaming deserialization.

@@ -1,153 +1,115 @@
-# UI 模拟器（在 Mac 上把屏幕画出来）
+**English** | [简体中文](README.zh-CN.md)
 
-240×135 太小、板子又不一定插着，光靠脑补坐标很容易把两块东西摞在一起。
-这个工具**直接编译 `src/` 里那份真正的绘制代码**（不是照抄一份，所以不会跟固件走偏），
-在本机渲染成 PNG，用来核对布局有没有重叠/出界。
+# UI Simulator (Host-side Screen Renderer)
+
+240×135 is very compact, and the hardware board might not always be connected. Trying to imagine coordinates mentally often leads to accidentally stacking two elements on top of each other.
+This tool **directly compiles the actual rendering code from `src/`** (rather than maintaining a duplicate copy, preventing drift from firmware behavior) and renders off-screen PNGs on the host machine to verify layout overlap and clipping.
 
 ```bash
-pio run                                    # 先跑一次：M5GFX / ArduinoJson 是从
-                                           # .pio/libdeps/ 里取的，没装依赖就没有这两个库
-cp src/secrets.h.example src/secrets.h     # router.cpp / sats.cpp 都 #include 它
+pio run                                    # Run once first: M5GFX and ArduinoJson are fetched
+                                           # from .pio/libdeps/; dependencies must be installed
+cp src/secrets.h.example src/secrets.h     # Both router.cpp and sats.cpp #include this
 cd tools/uisim
-./build.sh          # 编译 + 渲染，PNG 落在 out/
-open out/weather_1_now.png
+./build.sh          # Compile + render; PNGs output to out/
+# macOS: open out/weather_1_now.png
+# Linux: xdg-open out/weather_1_now.png
 ```
 
-当前渲染这些页（`out/` 下同名 PNG）：
+Currently renders these views (saved as matching PNG names under `out/`):
 
-| 文件 | 页 |
+| File | View |
 |---|---|
-| `weather_1_now` / `weather_2_hourly` / `weather_4_air` / `weather_5_aqi` / `weather_6_forecast` | Weather 五页 |
-| `weather_2_hourly_cold` / `weather_6_forecast_cold` | 同样两页换一份冬天数据：温度标签变成 4 个字符（`-12C`／Imperial 的 `104F` 同宽），专看会不会被屏幕边切掉、会不会跟邻列压字 |
-| `astro_1_daylight` / `astro_2_moon` / `astro_3_terminator` | Astro 三页 |
-| `astro_1_daylight_polar_n` / `_polar_s` | Daylight 的极昼 / 极夜分支（纬度挪到 ±85，哪张是极昼随季节换） |
-| `adsb` | ADS-B 飞机雷达 |
-| `sats` | 卫星过顶 |
-| `typhoon_1_alert` / `typhoon_2_track` | 台风预警 / 路径 |
-| `quake_1_list` / `quake_2_map` / `quake_3_scrolled` | 地震列表 / 世界地图打点 / 列表滚到底 |
-| `okx` | OKX 的 USDT/CNY 换算率（假数据里的值刻意写成**字符串**，跟 OKX v5 的真实形状一致）|
-| `fx_1_rate` / `fx_2_days` | 汇率现价+走势 / 逐日收盘（假数据里刻意跳过周末，跟欧洲央行的公布节奏一致）|
-| `router_0_connecting` / `router` | Router "连接中" 和正常状态 |
-| `stopwatch` | 秒表 |
-| `clock_1_hierarchic` / `_unsynced` | 时钟表盘 1：层次生活进度条（已对时 / 未对时）|
-| `clock_2_analog` / `_unsynced` | 时钟表盘 2：经典模拟指针（毫秒插值秒针平滑扫秒，已对时 / 未对时）|
-| `clock_3_digital` / `_unsynced` | 时钟表盘 3：大字数码表盘（Font7 数码管铺满，已对时 / 未对时）|
-| `clock_4_text` / `_unsynced` | 时钟表盘 4：QlockTwo 极简文字表盘（已对时 / 未对时）|
-| `gnss_1_overview_fix` / `_nofix` / `_rfoff` | GNSS 概览：天空图方位仰角分布、经纬度高度速度、未定位与射频关断状态 |
-| `gnss_2_detail_deg` / `_dms` / `_grid` / `_utm` / `_neg_coords` / `_nofix` | GNSS 详情：4 种坐标制式（DEG/DMS/GRID/UTM）、南半球负坐标、未定位状态 |
-| `gnss_3_sat_sky` / `_sky_crowded` / `_sky_empty` | GNSS 卫星页默认的天空图（与 Sats 同一坐标系）：常规数据 / 五星座挤在一片方位、无 SNR、三位数 PRN 的标签避让 / 没有卫星的空状态 |
-| `gnss_3_sat_p1` / `_p2` | 同一页按 m 切出的卫星表：在用星（高亮绿点+星座鲜艳色）与可见星区分、信噪比与仰角方位角、两页垂直滚动 |
-| `gnss_4_config_on` / `_off` | GNSS 配置：ATGM336H 频度/星系/动态模式/NMEA语句/天线供电胶囊指示 |
-| `gnss_5_speed_120` / `_360` / `_1000` / `_nofix` | GNSS 速度表：半圆运动仪表盘，自适应 120/360/1000 三档量程、光弧与数码读数 |
-| `gnss_6_trip` | GNSS 行程与诊断：TTFF、重捕耗时、里程、时长、极速极值、2分钟 SNR 曲线 |
-| `spectrum_0_mic_unavailable` / `_1_bars` / `_2_waterfall` / `_3_vu_led` / `_4_rec_serial` | 音频频谱：柱状图、伪彩色瀑布图、单颗 RGB 电平指示、串口录音串流 |
-| `hash_oven_0_cold` / `_baking` | Hash Oven 算力烤炉：跑分待机与双核满载烧机动画 |
-| `hash_oven_1_aes_enc` / `_rc4_dec` | Hash Oven 对称加解密：AES-128-CBC 与 RC4 流密码 |
-| `hash_oven_2_caesar` / `_base64` | Hash Oven 古典/CTF工具：凯撒 ROT13 移位与 Base64 双向转换 |
-| `hash_oven_3_sha512_standby` / `_sha512_done` / `_sha256` | Hash Oven 密码哈希：Linux Shadow $6$ 与标准哈希计算 |
-| `hash_oven_4_crack_standby` / `_crack_trying` | Hash Oven 穷举破解：PIN 字典爆破尝试与进度 ETA |
-| `settings_1_p1` ~ `_p4` | 设置菜单 4 页列表：Wi-Fi、亮度、音量、LED、主题、休眠、时区等 13 项参数 |
-| `settings_led_off` ~ `_music` | 设置 LED 模式：6 档工作模式微调与状态胶囊显示 |
-| `settings_sub_bright` ~ `_format` | 设置二级弹窗：亮度和音量条、休眠超时、时区列表、电池状态、SD 格式化 |
-| `ssh_cfg_1_password` ~ `_nowifi` | SSH 配置：主机/端口/用户/密码/SD卡私钥扫描、字号选择、连接按钮与参数弹窗 |
-| `menu_0_tools` ~ `menu_6_more` | 主菜单：7 大功能分组轮播导航与磁吸选框动画 |
-| `menu_theme_amber` | 主菜单：琥珀金等主题配色 |
-| `about_1_info` / `_2_usage` / `_3_ram` / `_ram_scrolled` / `_ram_empty` | 关于系统：硬件规格、内存与存储用量、12 阶段 RAM Profile 消耗瀑布图与滚动 |
+| `weather_1_now` / `weather_2_hourly` / `weather_4_air` / `weather_5_aqi` / `weather_6_forecast` | 5 Weather pages |
+| `weather_2_hourly_cold` / `weather_6_forecast_cold` | Same two pages rendered with winter mock data: temperature labels expand to 4 characters (`-12C` / Imperial `104F` equivalent width), verifying edges are not clipped and neighboring text is not overwritten |
+| `astro_1_daylight` / `astro_2_moon` / `astro_3_terminator` | 3 Astro pages |
+| `astro_1_daylight_polar_n` / `_polar_s` | Daylight polar day / polar night branches (latitude set to ±85; which is polar day shifts with season) |
+| `adsb` | ADS-B aircraft radar |
+| `sats` | Satellite passes |
+| `typhoon_1_alert` / `typhoon_2_track` | Typhoon alerts / tracks |
+| `quake_1_list` / `quake_2_map` / `quake_3_scrolled` | Earthquake list / world map plot / list scrolled to bottom |
+| `okx` | OKX USDT/CNY exchange rate (mock values intentionally formatted as **strings**, matching true OKX v5 format) |
+| `fx_1_rate` / `fx_2_days` | Forex spot rate + chart / daily closes (mock data deliberately skips weekends, matching ECB publication schedules) |
+| `router_0_connecting` / `router` | Router "connecting" and normal operational states |
+| `stopwatch` | Stopwatch |
+| `clock_1_hierarchic` / `_unsynced` | Clock face 1: Hierarchical life progress bar (synced / unsynced) |
+| `clock_2_analog` / `_unsynced` | Clock face 2: Classic analog hands (smooth millisecond-interpolated sweep second hand, synced / unsynced) |
+| `clock_3_digital` / `_unsynced` | Clock face 3: Big digital face (Font7 digital segments full-width, synced / unsynced) |
+| `clock_4_text` / `_unsynced` | Clock face 4: QlockTwo minimalist text matrix (synced / unsynced) |
+| `gnss_1_overview_fix` / `_nofix` / `_rfoff` | GNSS overview: Skyplot azimuth/elevation distribution, lat/lon/alt/speed, unlocated and RF-off states |
+| `gnss_2_detail_deg` / `_dms` / `_grid` / `_utm` / `_neg_coords` / `_nofix` | GNSS details: 4 coordinate systems (DEG/DMS/GRID/UTM), southern hemisphere negative coordinates, unlocated state |
+| `gnss_3_sat_sky` / `_sky_crowded` / `_sky_empty` | GNSS satellite skyplot (same coordinate system as Sats): typical data / crowded 5-constellation azimuth clutter, zero SNR, 3-digit PRN label collision avoidance / empty state without satellites |
+| `gnss_3_sat_p1` / `_p2` | Satellite table toggled via `m`: active satellites (highlighted green dot + vivid constellation color) vs visible satellites, SNR and el/az, 2-page vertical scroll |
+| `gnss_4_config_on` / `_off` | GNSS config: ATGM336H rate/constellation/dynamic mode/NMEA sentence/antenna power pill indicators |
+| `gnss_5_speed_120` / `_360` / `_1000` / `_nofix` | GNSS speedometer: semicircular gauge dashboard, auto-ranging 120/360/1000 scales, light arc and digital readout |
+| `gnss_6_trip` | GNSS trip & diagnostics: TTFF, reacquisition duration, distance, duration, top speed records, 2-minute SNR history |
+| `spectrum_0_mic_unavailable` / `_1_bars` / `_2_waterfall` / `_3_vu_led` / `_4_rec_serial` | Audio spectrum: bar chart, pseudo-color waterfall, single RGB VU level, serial audio stream |
+| `hash_oven_0_cold` / `_baking` | Hash Oven compute benchmark: standby and dual-core full-load burn-in animation |
+| `hash_oven_1_aes_enc` / `_rc4_dec` | Hash Oven symmetric crypto: AES-128-CBC and RC4 stream cipher |
+| `hash_oven_2_caesar` / `_base64` | Hash Oven classic/CTF tools: Caesar ROT13 shift and bidirectional Base64 conversion |
+| `hash_oven_3_sha512_standby` / `_sha512_done` / `_sha256` | Hash Oven password hashing: Linux Shadow $6$ and standard hash calculation |
+| `hash_oven_4_crack_standby` / `_crack_trying` | Hash Oven brute-force cracker: PIN dictionary brute-force attempt and progress ETA |
+| `settings_1_p1` ~ `_p4` | Settings menu 4-page list: Wi-Fi, brightness, volume, LED, theme, sleep timeout, time zone, and 13 configurable parameters |
+| `settings_led_off` ~ `_music` | Settings LED mode: 6 operating modes fine-tuning and status pill indicators |
+| `settings_sub_bright` ~ `_format` | Settings secondary popups: brightness/volume sliders, sleep timeout, timezone list, battery status, SD format confirmation |
+| `ssh_cfg_1_password` ~ `_nowifi` | SSH config: host/port/user/password/SD private key scan, font size selection, connect button, and parameter popups |
+| `menu_0_tools` ~ `menu_6_more` | Main menu: 7 functional group carousel navigation with snapping selector animations |
+| `menu_theme_amber` | Main menu: Amber theme color scheme |
+| `about_1_info` / `_2_usage` / `_3_ram` / `_ram_scrolled` / `_ram_empty` | About system: Hardware specs, memory and storage usage, 12-stage RAM Profile waterfall chart with scrolling |
 
-`data/` 里存的是**真实的 JMA 报文**（targetTc / specifications / forecast 各一份）。
-台风那两页的假响应从这几个文件读，而不是塞进 `sim_main.cpp` 的字符串——5.7KB 的 JSON
-写成 C 字符串既难看又容易在转义上出错，留着原文件以后还能拿去核对解析结果。
+`data/` stores **real JMA payloads** (targetTc, specifications, and forecast samples).
+Mock responses for typhoon pages are read directly from these files rather than embedded as strings in `sim_main.cpp`—storing 5.7KB of JSON as C string literals is messy and prone to escape errors, and keeping raw files allows verifying parsing results later.
 
-## 它是怎么骗过固件代码的
+## How It Fools Firmware Code
 
-- `stubs/` 里放了一层极简替身：`M5Unified.h`（M5Canvas → 无父设备的 LGFX_Sprite）、
-  `WiFi.h` / `HTTPClient.h` / `Preferences.h`、以及一个够用的 `String`。
-  不能 `#define ARDUINO`——那会让 LovyanGFX 去找真正的 Arduino 运行时。
-- 假 `HTTPClient` 按 `begin()` 的 URL path 从 `sim_main.cpp` 的响应表取 JSON，
-  同时支持 `getString()` 和流式 `getStream()`/`getStreamPtr()`；因此 weather、ADS-B、
-  卫星和 router 的取数函数都是真跑、真解析、真填页面状态。
-- 渲染用 M5GFX 自带的 SDL 平台层（`brew install sdl2`），但不开窗口，只在内存里画。
-- PNG 由 `sim_main.cpp` 里几十行手写编码器输出（zlib 用 stored block），不引第三方库；
-  默认放大 4 倍，不然 240×135 的字根本看不清。
+- `stubs/` provides a minimalist mock layer: `M5Unified.h` (M5Canvas → parentless `LGFX_Sprite`), `WiFi.h` / `HTTPClient.h` / `Preferences.h`, and a functional `String` implementation. `#define ARDUINO` must NOT be defined—otherwise LovyanGFX attempts to locate the real Arduino runtime.
+- Mock `HTTPClient` fetches JSON responses mapped by `begin()` URL paths in `sim_main.cpp`, supporting both `getString()` and streaming `getStream()` / `getStreamPtr()`. Thus, data retrieval functions for weather, ADS-B, satellites, and router execute, parse, and populate page states identically to firmware.
+- Rendering relies on M5GFX's built-in SDL platform layer (macOS: `brew install sdl2`, Linux: `sudo apt install libsdl2-dev`), drawing directly in memory without opening a GUI window.
+- PNGs are output by a concise ~50-line encoder in `sim_main.cpp` (using zlib stored blocks) without external library dependencies, scaled 4x by default for readability.
 
-## 它顺带还验了菜单表
+## It Also Validates Menu Tables
 
-`build.sh` 在编模拟器之前，先对 `src/globals.cpp` / `pages.cpp` / `icons.cpp` 做一遍
-**只查语法**的编译。这三个文件不进模拟器二进制（`globals.cpp` 会跟 `sim_main.cpp` 抢同一批
-全局定义），过一遍纯粹是为了 `globals.cpp` 里那两条 `static_assert`：
+Before compiling the simulator, `build.sh` performs a **syntax-only compile** of `src/globals.cpp`, `pages.cpp`, and `icons.cpp`. These files are omitted from the simulator binary (`globals.cpp` would collide with definitions in `sim_main.cpp`), and are checked purely to trigger two compile-time `static_assert` checks in `globals.cpp`:
 
-- `GROUPS[]` 必须首尾相接、正好盖满 `APPS[]`，且每组不超过一屏
-- 组名必须放得进 tab 条（7 组时每格只有 34px）
+- `GROUPS[]` must be contiguous, fully cover `APPS[]`, and each group must fit on a single screen
+- Group names must fit into the tab bar (only 34px per tab when 7 groups are present)
 
-加 app 最容易错的就是这两张表，而错法是**静默**的（某个 app 从菜单里消失、或者两组重叠着
-显示同一个）。有了这一步，不用 `pio`、不插板子也能验它改对了没有——实测把 SKY 的 count
-故意写小 1，这里当场报出那条中文断言。
+When adding apps, menu tables are prone to silent errors (an app disappearing from menus, or two groups overlapping to display identical items). This step validates configuration integrity without requiring PlatformIO or physical hardware—deliberately decrementing the count of SKY immediately trips the assertion.
 
-## 自检会让 build.sh 真的挂掉
+## Self-Tests Fail build.sh for Real
 
-模拟器现在除了渲图还跑一条自检：fx 的解析器**没对过真实响应**（出口代理拦了所有免 key
-汇率接口），所以拿同一份数据的两种响应形状各跑一遍，要求解出的点数一致。
-挂了会打 `FAIL` **并让 `./build.sh` 返回非零**——只打一行字是拦不住人的，
-没人会在几十行 `wrote out/xxx.png` 里注意到中间那句。PNG 照旧先拷出来再传播退出码，
-自检挂了也还能看图。
+In addition to rendering images, the simulator executes a self-test: the forex parser previously lacked live verification against real-world responses (due to egress proxy restrictions on free APIs), so two response shapes for identical data are parsed and verified to yield matching data points.
+Failures emit `FAIL` **and force `./build.sh` to exit with a non-zero code**—a single text warning would otherwise be lost among dozens of `wrote out/xxx.png` lines. PNGs are copied out before propagating exit codes, allowing visual inspection even if self-tests fail.
 
-⚠️ 写自检的时候栽过一次，值得记：`simResponseForPath` 是**第一个匹配就返回**，
-所以想换某个 key 的假响应必须用 `simSetResponse()` 覆盖，往后面 `push_back` 一条同 key 的
-**永远轮不到它**。第一版就是这么写的，结果它把同一份数据解了两遍还报 ok——
-把要测的那个容忍分支故意删掉都照样通过。**自检写完一定要故意弄坏一次，看它响不响。**
+⚠️ Note on writing self-tests: `simResponseForPath` returns on the **first matching key**. Overriding a mock response for a key requires `simSetResponse()`; using `push_back` with a duplicate key will never be reached. An earlier draft made this mistake, parsing identical data twice and silently passing even when intentional regression bugs were introduced. **Always verify new self-tests by deliberately triggering a failure.**
 
-## ⚠️ 假数据缺一个字段，那一页就等于没测
+## ⚠️ Missing Fields in Mock Data Leave Pages Untested
 
-`simResponseForPath()` 匹配不到的 URL 会掉到 `simCannedResponse`，取数函数解不出东西，
-页面就画它的空状态——**不报错，只是画面上一句 "no hourly data"**，看起来还挺正常。
-所以加页面时要连它依赖的每一个接口一起给假响应，然后**真的把 PNG 打开看一眼**。
+When `simResponseForPath()` cannot match a URL, it falls back to `simCannedResponse`. If data retrieval parses nothing, the page renders its empty state without error—displaying "no hourly data" and appearing deceptively normal.
+When adding views, mock responses must be supplied for every endpoint dependency, followed by visual inspection of the resulting PNGs.
 
-已经这么栽过：`simCannedResponse` 里一直没有 `hourly`，也没有空气质量那个端点的响应，
-于是 "Next 24h" 和 AQI 两页在模拟器里长期只画空状态，整页布局从来没被看过。
-2026-09-02 把假数据补齐，第一帧就露出 `drawWeatherHour()` 左边留白只有 14px
-——而温度标签 "34C" 要 18px，右对齐之后首字符被推到屏幕外，常年显示成 "4C"。
+For example, `simCannedResponse` initially omitted `hourly` and air quality endpoints, causing the "Next 24h" and AQI pages to display empty states unnoticed. Supplying complete mock data immediately revealed that `drawWeatherHour()` had only 14px left margin—whereas the "34C" temperature label required 18px, pushing the initial character off-screen into "4C".
 
-**光有"典型值"还不够**：夏天那份假数据里温度全是 2 位数，3 个字符，
-而 Forecast 页左右分列的标签正好在 3 个字符时还剩 2px 余量——看着没问题，一入冬
-（`-12C`，4 个字符）就既压邻列又掉出屏幕。所以那两页各多渲一张冬天的
-（`*_cold.png`），把"最长的那个标签"也画出来。
+**Typical values alone are insufficient**: summer mock data featured two-digit temperatures (3 characters), fitting comfortably in Forecast page columns with 2px margin. In winter (`-12C`, 4 characters), labels overlapped neighboring columns and clipped off-screen. Both views now render supplementary winter variants (`*_cold.png`) to test maximum-width labels.
 
-`data/usgs_quakes.json` 是**真实形状**的 USGS 摘要源报文（9 条，含一条 `mag: null` 的
-——那是刚发生还没定级的事件，解析器必须跳过它，屏幕右上角因此写的是 "8 shown"）。
-⚠️ 它的时间戳由 `sim_main.cpp` 的 `restampQuakes()` 整体平移到"现在"再喂进去：
-文件里存的是抓取当天的绝对毫秒值，原样用的话页面上的"多久之前"会随日子越变越大，
-几个月后截图上全是 `180d`，看着像坏了。只平移时间轴，别的字段一个没动。
+`data/usgs_quakes.json` contains a authentic USGS summary feed payload (9 items, including one with `mag: null` for unclassified events, which parser must skip, resulting in "8 shown" in the top right corner).
+⚠️ Timestamps are offset to relative "now" by `restampQuakes()` in `sim_main.cpp`: raw millisecond timestamps would cause "time ago" displays to grow indefinitely over months (e.g. `180d`), appearing broken. Only the time axis is shifted; all other fields remain unmodified.
 
-`/above/`（N2YO 卫星）那份也栽过同一条：少了 `info.satcount` 的话 sats.cpp 直接判
-"bad response (no 'info')"，整页只画一行红字。而且**光有响应还不够**——12 颗星原来
-全给在本机附近 1 度内，于是全叠在天顶那一格，天际图的纵轴等于没画。现在按中心角
-1~22 度铺开（550km 轨道的可见半径只有 23 度），从天顶到贴地平线都有点。
-另外 ADS-B 的假数据里**刻意留了一架正北的飞机**：横轴两端都是 N，方位 0/360 的目标
-会被屏幕边劈成两半，`drawWrapped` 就是为它写的，没有这样一架那条路径永远走不到。
+Similarly for `/above/` (N2YO satellites): omitting `info.satcount` causes sats.cpp to report "bad response (no 'info')" and display a red error message. Furthermore, realistic satellite distributions are essential—initially placing 12 satellites within 1 degree of the device caused them to cluster at the zenith, leaving elevation tracks unrendered. Distributing them across central angles 1°–22° (matching the ~23° horizon visibility radius for 550km orbits) properly covers zenith to horizon.
+Additionally, ADS-B mock data deliberately includes an aircraft heading due north: azimuths at 0°/360° span across the screen wrap boundary, exercising the `drawWrapped` logic.
 
-⚠️ 还有一条跟 secrets 有关：`N2YO_API_KEY` 为空时 Sats 页在取数之前就返回了。
-模拟器不发真请求，所以给 `src/secrets.h` 里填任意非空占位串即可（比如 `"SIMULATOR"`）。
+⚠️ Secrets handling: when `N2YO_API_KEY` is empty, the Sats view exits early before fetching. Since the simulator makes no live requests, filling `src/secrets.h` with any non-empty placeholder (e.g. `"SIMULATOR"`) suffices.
 
-同理，`/memory` 的假响应要给**两条**：mihomo 第一条是占位零值，
-`router.cpp` 靠 `clashLine(..., skipObjects=1)` 跳掉它。只给一条的话 MEM 恒为 0M，
-正好把那个已经修过的 bug 在模拟器里又演一遍。
+Likewise, `/memory` mock responses must include two entries: the initial entry in mihomo contains zero placeholder values, which `router.cpp` skips via `clashLine(..., skipObjects=1)`. Supplying only one entry keeps MEM permanently at 0M, reproducing a previously resolved bug.
 
-## 加新页面
+## Adding New Pages
 
-在 `sim_main.cpp` 的 `main()` 里加一行 `shoot("out/xxx.png", drawXxx);`，
-再把对应的 `src/xxx.cpp` 加进 `build.sh` 的编译列表即可。
-如果那个页面依赖别的模块（比如 `M5.Power`、SD 卡），要么在 `sim_main.cpp` 里补个假实现，
-要么就别编进来——这工具只关心"画得对不对"。
+To add a view, add `shoot("out/xxx.png", drawXxx);` in `main()` of `sim_main.cpp`, and append the corresponding `src/xxx.cpp` to the compile list in `build.sh`.
+If the page depends on external modules (e.g., `M5.Power`, SD card), either implement a mock in `sim_main.cpp` or decouple the dependency—the simulator focuses strictly on visual layout correctness.
 
-## ⚠️ 一条铁律：不要在模拟器里"抄一份"绘制代码
+## ⚠️ An Iron Rule: Never "Duplicate" Rendering Code in the Simulator
 
-模拟器的全部价值在于**编译 `src/` 里那份真代码**。曾经有一次为了图省事，把
-`drawSkyBg()` 复制进 `sim_main.cpp`（因为它当时在 `ui_common.cpp` 里，而那个文件
-拖着 M5.Display/icons/worldmap 一堆板级依赖，桌面编不动）——结果改了 `src/` 那份，
-渲染出来的图纹丝不动，白查半天。
+The core value of the simulator lies in **compiling the production code from `src/`**. Duplicating `drawSkyBg()` into `sim_main.cpp` previously led to confusion when edits to `src/` produced no change in simulator output.
 
-正确做法是**把这类共用绘制件拆到一个没有板级依赖的小文件**（比如 `src/skyview.cpp`），
-然后把它加进 `build.sh` 的编译列表。
+The correct approach is to **extract shared rendering components into lightweight helper files without board-level dependencies** (such as `src/skyview.cpp`), and add them to `build.sh`.
 
-`sim_main.cpp` 里唯一允许的重复是 `trunc()` / `nowHM()` / `drawPageDots()` 这三个
-几行的小工具（连同注释一起标注了原因）。除此之外一律编译真文件。
+The only allowed duplications in `sim_main.cpp` are trivial helper utilities (`trunc()`, `nowHM()`, `drawPageDots()`), annotated with clear rationales. All application drawing code must compile directly from source.

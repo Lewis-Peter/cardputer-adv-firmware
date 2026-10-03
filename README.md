@@ -4,6 +4,8 @@
 > **开源版说明**：这是脱敏后的公开版本（全新提交历史）。使用前请 `cp src/secrets.h.example src/secrets.h` 并填入自己的 API key；
 > SSH / VPN 探测目标等个人配置都在设备上填写（存 NVS），默认值为空或文档保留地址（203.0.113.10）。
 > 编译期默认值（NTP 服务器、热点名/默认密码、网络探测目标）见 `src/config.h`；`cp src/config_local.h.example src/config_local.h` 后只写想覆盖的宏。
+> 电台列表：改 `CFG_RADIO_PRESETS`，或在 SD 卡根目录放 `/radio.txt`（每行 `名称|http://直链|风格`，`#` 注释，最多 12 条，免重编译）。
+> 地图在线瓦片源：`CFG_MAP_TILE_URL`（占位符 `{s}{x}{y}{z}`）/ `CFG_MAP_TILE_SUBS` / `CFG_MAP_TILE_WGS84`（坐标系）。
 > 文档里提到的 `cardputer-bridge`（PC 端配套工具）目前未公开。许可证：MIT（`lib/` 与 `sha512_crypt.*` 为第三方代码，保留原许可）。
 
 M5Stack Cardputer ADV 上的自制固件，40 个 app 塞在一个 240×135 的屏幕里。

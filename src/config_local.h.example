@@ -9,3 +9,8 @@
 // #define CFG_PROBE_VPN_PORT 443
 // #define CFG_PROBE_BASELINE_IP "9.9.9.9"
 // #define CFG_PROBE_BASELINE_NAME "quad9"
+// #define CFG_MAP_TILE_URL "http://tiles.example.org/{z}/{x}/{y}.jpg"
+// #define CFG_MAP_TILE_SUBS "abc"
+// #define CFG_MAP_TILE_WGS84 1
+// 电台内置列表（也可以用 SD 卡 /radio.txt 免重编译）：
+// #define CFG_RADIO_PRESETS {"My Station", "http://example.com/stream.mp3", "Jazz"},

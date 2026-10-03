@@ -12,22 +12,59 @@
 #include "ui_common.h"
 #include "list_sel.h"
 #include "audio_common.h"
+#include "sd_files.h"
+#include "config.h"
 
 static volatile uint8_t gRadioVuLevel = 0; // 实时电平 (0..100)
 
 // ---- 预置电台（全部为公开 HTTP MP3 直链，无需认证）----
+// 内置列表在 config.h（CFG_RADIO_PRESETS）；SD 卡 /radio.txt 存在时整体替换（见 loadStations）
 struct Station { const char* name; const char* url; const char* genre; };
-static const Station PRESETS[] = {
-  {"Groove Salad",   "http://ice1.somafm.com/groovesalad-128-mp3", "Downtempo"},
-  {"Lush",           "http://ice6.somafm.com/lush-128-mp3",        "Chillout"},
-  {"Deep Space 1",   "http://ice1.somafm.com/deepspaceone-128-mp3", "Deep Ambient"},
-  {"Secret Agent",   "http://ice1.somafm.com/secretagent-128-mp3", "Spy Lounge"},
-  {"Soul Fly",       "http://ice1.somafm.com/sofly-128-mp3",       "Soul Funk"},
-  {"Drone Zone",     "http://ice1.somafm.com/dronezone-128-mp3",   "Drone Ambient"},
+static const Station BUILTIN_PRESETS[] = {
+  CFG_RADIO_PRESETS
   {"[Custom URL]",   "",                                           "User Defined"},
 };
-static const int STATION_COUNT = sizeof(PRESETS) / sizeof(PRESETS[0]);
-static const int CUSTOM_IDX    = STATION_COUNT - 1;
+static const int BUILTIN_COUNT = sizeof(BUILTIN_PRESETS) / sizeof(BUILTIN_PRESETS[0]);
+
+static const int SD_ST_MAX = 12;
+struct SdStation { char name[20]; char url[88]; char genre[16]; };
+static SdStation sdStations[SD_ST_MAX];
+static Station presetsSd[SD_ST_MAX + 1];
+
+static const Station* PRESETS = BUILTIN_PRESETS;
+static int STATION_COUNT = BUILTIN_COUNT;
+static int CUSTOM_IDX    = BUILTIN_COUNT - 1;
+
+// 读 SD 卡 /radio.txt：每行 "名称|URL|风格"（风格可省），# 注释。至少一条有效才替换内置列表。
+static void loadStations() {
+  PRESETS = BUILTIN_PRESETS; STATION_COUNT = BUILTIN_COUNT; CUSTOM_IDX = BUILTIN_COUNT - 1;
+  if (!sdReady() || !SD.exists("/radio.txt")) return;
+  File f = SD.open("/radio.txt", FILE_READ);
+  if (!f) return;
+  int n = 0;
+  while (f.available() && n < SD_ST_MAX) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() == 0 || line[0] == '#') continue;
+    int p1 = line.indexOf('|');
+    if (p1 <= 0) continue;
+    int p2 = line.indexOf('|', p1 + 1);
+    String name = line.substring(0, p1);
+    String url  = (p2 < 0) ? line.substring(p1 + 1) : line.substring(p1 + 1, p2);
+    String genre = (p2 < 0) ? String("") : line.substring(p2 + 1);
+    name.trim(); url.trim(); genre.trim();
+    if (!name.length() || !url.startsWith("http://") || url.length() >= sizeof(sdStations[0].url)) continue;
+    snprintf(sdStations[n].name, sizeof(sdStations[n].name), "%s", name.c_str());
+    snprintf(sdStations[n].url, sizeof(sdStations[n].url), "%s", url.c_str());
+    snprintf(sdStations[n].genre, sizeof(sdStations[n].genre), "%s", genre.length() ? genre.c_str() : "Custom");
+    presetsSd[n] = { sdStations[n].name, sdStations[n].url, sdStations[n].genre };
+    n++;
+  }
+  f.close();
+  if (n == 0) return;
+  presetsSd[n] = BUILTIN_PRESETS[BUILTIN_COUNT - 1];   // 末尾仍是 [Custom URL]
+  PRESETS = presetsSd; STATION_COUNT = n + 1; CUSTOM_IDX = n;
+}
 
 // ---- 全局状态 ----
 String radioCustomUrl  = "";
@@ -527,6 +564,7 @@ void radioEnter() {
   pendingAction = PENDING_NONE;
 
   if (gTask == nullptr) {
+    loadStations();   // 没在播才重载：播放任务/界面还在引用当前列表
     canvasRestore();
     rStatus      = RS_STOPPED;
     radioPlayIdx = -1;

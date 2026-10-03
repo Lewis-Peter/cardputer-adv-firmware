@@ -16,6 +16,7 @@
 #include "sd_files.h"
 #include "worldmap.h"
 #include "http_json.h"
+#include "config.h"
 
 static const int GPS_TX_PIN = 13;   // ESP32 TX -> 模块 GPS-RX
 static const int GPS_RX_PIN = 15;   // ESP32 RX <- 模块 GPS-TX
@@ -2232,7 +2233,7 @@ static bool isOsmCoord() {
     for (const char* m : MARKS)
       if (SD.exists(m)) { osmCoordCached = 1; return true; }
     if (!SD.exists("/")) { mapSdBad = true; return false; }   // 根目录都没有 = 卡坏/拔了，不算"没有标牌"
-    osmCoordCached = 0;
+    osmCoordCached = CFG_MAP_TILE_WGS84 ? 1 : 0;   // 卡上没标牌：跟在线瓦片源的坐标系走
   }
   return osmCoordCached == 1;
 }
@@ -2379,6 +2380,30 @@ static bool loadTileFromSd(int z, int tx, int ty, int dx, int dy) {
   return ok;
 }
 
+// 把 config.h 的 CFG_MAP_TILE_URL 模板展开成真正的 URL：{s} 子域、{x}{y}{z} 瓦片坐标
+static void buildTileUrl(char* out, size_t n, int subRound, int tx, int ty, int z) {
+  static const char SUBS[] = CFG_MAP_TILE_SUBS;
+  const size_t nsub = sizeof(SUBS) - 1;
+  const char* t = CFG_MAP_TILE_URL;
+  size_t o = 0;
+  while (*t && o + 1 < n) {
+    if (t[0] == '{' && t[1] && t[2] == '}') {
+      char tmp[12]; tmp[0] = 0;
+      switch (t[1]) {
+        case 's': if (nsub) { tmp[0] = SUBS[subRound % nsub]; tmp[1] = 0; } break;
+        case 'x': snprintf(tmp, sizeof(tmp), "%d", tx); break;
+        case 'y': snprintf(tmp, sizeof(tmp), "%d", ty); break;
+        case 'z': snprintf(tmp, sizeof(tmp), "%d", z);  break;
+        default: break;
+      }
+      size_t l = strlen(tmp);
+      if (o + l >= n) break;
+      memcpy(out + o, tmp, l); o += l; t += 3;
+    } else out[o++] = *t++;
+  }
+  out[o] = 0;
+}
+
 static bool fetchOneTile(int z, int tx, int ty, int dx, int dy) {
   // 每建一条 TCP 连接、解一块 JPEG 都要点堆。实测连拉几轮之后 largestBlock 会掉到 9KB
   // （关掉的连接在 LwIP 里还要 TIME_WAIT 一阵才把内存还回来），太紧的时候宁可这块不画，
@@ -2392,10 +2417,7 @@ static bool fetchOneTile(int z, int tx, int ty, int dx, int dy) {
   char url[128];
   // 子域按轮次选，不按瓦片选：同一轮里几块图打同一台，省掉重复 DNS，
   // 连接也更容易被 keep-alive 复用（每建一条 TCP，LwIP 的 PCB 加 TIME_WAIT 都要吃几 KB）
-  const int sub = (z + jobIdx / 8) % 4 + 1;
-  snprintf(url, sizeof(url),
-           "http://webst0%d.is.autonavi.com/appmaptile?style=6&x=%d&y=%d&z=%d",
-           sub, tx, ty, z);
+  buildTileUrl(url, sizeof(url), (z + jobIdx / 8), tx, ty, z);
 
   // ⚠️ 明文 HTTP 是必须的，不是偷懒：走 https 时 mbedTLS 握手要 40~50KB 连续堆，而这会儿
   // 地图缓存(48KB) + 主画布(64KB) 都占着，实测握手直接失败（start_ssl_client: -1，
@@ -2544,7 +2566,7 @@ static bool jobTileAt(int idx, int& wrapped, int& ty, int& dx, int& dy) {
 // ⚠️ 卡上是 WGS-84/OSM 瓦片包时不拿高德（GCJ-02）补缺：两套坐标差几百米，
 // 拼在一起接缝处道路会错开，还不如留占位框
 static bool onlineFallbackAllowed() {
-  return WiFi.status() == WL_CONNECTED && !isOsmCoord();
+  return WiFi.status() == WL_CONNECTED && (isOsmCoord() == (CFG_MAP_TILE_WGS84 != 0));
 }
 
 // 补拉一块之前失败的在线瓦片。成功就只对这一块做同样的压暗；一轮补完还有失败的，退避后再来

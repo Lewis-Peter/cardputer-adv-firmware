@@ -78,3 +78,21 @@
 #ifndef CFG_MAP_TILE_WGS84
 #define CFG_MAP_TILE_WGS84 0
 #endif
+
+// --- SSH（SSH app）---
+// 首次使用、NVS 里还没存配置时的默认连接信息；设备上改过的会存 NVS 并覆盖这里。
+// 默认主机留空：需要在设备上填，或在 config_local.h 里写自己的服务器。
+#ifndef CFG_SSH_DEFAULT_NAME
+#define CFG_SSH_DEFAULT_NAME "server"
+#endif
+#ifndef CFG_SSH_DEFAULT_HOST
+#define CFG_SSH_DEFAULT_HOST ""
+#endif
+#ifndef CFG_SSH_DEFAULT_USER
+#define CFG_SSH_DEFAULT_USER "ubuntu"
+#endif
+// 额外的私钥候选路径（SD 卡根目录下），写成接在数组后面的初始化项，每项前面带逗号，如：
+//   #define CFG_SSH_EXTRA_KEYS , "/myserver.key", "/myserver.pem"
+#ifndef CFG_SSH_EXTRA_KEYS
+#define CFG_SSH_EXTRA_KEYS
+#endif

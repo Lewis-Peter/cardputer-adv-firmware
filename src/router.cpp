@@ -1,4 +1,7 @@
 #include "router.h"
+#include "router_types.h"
+#include "router_hosts.h"
+#include "router_hist.h"
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
@@ -24,7 +27,11 @@ static String    errMsg = "";
 
 enum RouterPage {
   R_PAGE_TRAFFIC = 0,
-  R_PAGE_NODES   = 1
+  R_PAGE_FLOW    = 1,
+  R_PAGE_TYPES   = 2,
+  R_PAGE_NODES   = 3,
+  R_PAGE_HOSTS   = 4,
+  R_PAGE_HIST    = 5
 };
 static RouterPage routerPage = R_PAGE_TRAFFIC;
 
@@ -119,41 +126,80 @@ static bool clashGet(const char* path, JsonDocument& doc) {
   return fetchJsonHttp(client, url, doc, nullptr, options, clashErr);
 }
 
-static int clashCountConns() {
-  WiFiClient client;
-  HTTPClient http;
-  http.setConnectTimeout(2500);
-  http.setTimeout(5000);
-  char url[160];
-  snprintf(url, sizeof(url), "%s/connections", CLASH_BASE);
-  if (!http.begin(client, url)) return -1;
-  http.addHeader("Authorization", String("Bearer ") + CLASH_SECRET);
-  if (http.GET() != 200) { http.end(); return -1; }
-
-  WiFiClient* s = http.getStreamPtr();
-  const char* NEEDLE = "\"id\":";
-  char win[6] = {0};
-  int n = 0;
-  int depth = 0;
-  bool complete = false;
-  uint32_t t0 = millis();
-  uint8_t buf[256];
-  while (!complete && millis() - t0 < 2500 && (s->connected() || s->available())) {
-    int avail = s->available();
-    if (!avail) { delay(2); continue; }
-    int got = s->read(buf, avail > (int)sizeof(buf) ? (int)sizeof(buf) : avail);
-    if (got <= 0) break;
-    for (int i = 0; i < got; i++) {
-      char c = (char)buf[i];
-      memmove(win, win + 1, 4);
-      win[4] = c;
-      if (memcmp(win, NEEDLE, 5) == 0) n++;
-      if      (c == '{') depth++;
-      else if (c == '}') { if (--depth == 0) { complete = true; break; } }
+// Fixed-size aggregation; full names remain intact for identity comparisons.
+struct RouterFlow {
+  String names[3][3];
+  int counts[3][4] = {};
+  int links[2][4][4] = {};
+  int total = 0;
+  int bucket(int col, const char* name) {
+    for (int i = 0; i < 3; ++i) {
+      if (names[col][i] == name) return i;
+      if (!names[col][i].length()) { names[col][i] = name; return i; }
     }
+    return 3;
   }
-  http.end();
-  return complete ? n : -1;
+};
+static RouterFlow flow;
+static bool flowValid = false, flowLimited = false;
+static uint32_t flowUpdated = 0;
+static String flowError;
+static int flowFocus = -1;
+
+static RouterTypeStats typeStats;
+static bool typeByBytes = false;
+static RouterHostStats hostStats;
+static bool hostByBytes = true;
+static RouterHistory hist;     // 每 12 秒一个点，约 24 分钟
+
+static int clashCountConns() {
+  RouterFlow next;
+  RouterTypeStats nextTypes;
+  RouterHostStats nextHosts;
+  WiFiClient client;
+  String auth = String("Bearer ") + CLASH_SECRET;
+  HttpJsonOptions options(2500, 2500, nullptr, auth.c_str());
+  JsonDocument filter;
+  filter["metadata"]["sourceIP"] = true;
+  filter["metadata"]["network"] = true;
+  filter["metadata"]["host"] = true;
+  filter["metadata"]["destinationIP"] = true;
+  filter["metadata"]["destinationPort"] = true;
+  filter["download"] = true;
+  filter["upload"] = true;
+  filter["rule"] = true;
+  filter["chains"][0] = true;
+  uint32_t started = millis();
+  bool limited = false;
+  String err;
+  bool ok = fetchJsonStreamArray(client, String(CLASH_BASE) + "/connections",
+      "\"connections\"", &filter, options,
+      [&](JsonDocument& item, int) {
+        // Check before consuming: only a further item proves the data was truncated.
+        if (next.total >= 1000 || millis() - started >= 2500) { limited = true; return false; }
+        const char* source = item["metadata"]["sourceIP"] | "LOCAL";
+        const char* rule = item["rule"] | "UNKNOWN";
+        // mihomo chains are ordered from the final outbound back to the group.
+        const char* exit = item["chains"][0] | "UNKNOWN";
+        int ids[3] = { next.bucket(0, source), next.bucket(1, rule), next.bucket(2, exit) };
+        for (int c = 0; c < 3; ++c) ++next.counts[c][ids[c]];
+        ++next.links[0][ids[0]][ids[1]];
+        ++next.links[1][ids[1]][ids[2]];
+        ++next.total;
+        addRouterType(nextTypes, item);
+        addRouterHost(nextHosts, item);
+        return true;
+      }, err, 1001);
+  if (!ok) { flowError = err; return -1; }
+  flow = next;
+  typeStats = nextTypes;
+  hostStats = nextHosts;
+  if (flowFocus >= 0 && !flow.counts[flowFocus/4][flowFocus%4]) flowFocus = -1;
+  flowValid = true;
+  flowLimited = limited;
+  flowUpdated = millis();
+  flowError = "";
+  return next.total;
 }
 
 static void trafficClose() {
@@ -343,6 +389,7 @@ static void pollRouter() {
     if (clashGet(dp.c_str(), d)) delayMs = d["delay"] | 0;
   }
 
+  if (tick % 8 == 0 && memInuse > 0) hist.push(int32_t(memInuse / 1024), conns);
   tick++;
   dirty = true;
 }
@@ -355,6 +402,7 @@ void routerEnter() {
   tick = 0; online = false; errMsg = "";
   routerPage = R_PAGE_TRAFFIC;
   switchStatus = "";
+  flowValid = false; flowError = ""; flowFocus = -1; typeByBytes = false; hostByBytes = true; hist.clear();
   job.request();
   lastPollMs = millis();
   dirty = true;
@@ -368,7 +416,7 @@ void routerUpdate() {
 
 bool routerKey(char k) {
   if (k == '`') {
-    if (routerPage == R_PAGE_NODES) {
+    if (routerPage != R_PAGE_TRAFFIC) {
       routerPage = R_PAGE_TRAFFIC;
       dirty = true;
       return false;
@@ -377,7 +425,7 @@ bool routerKey(char k) {
   }
 
   if (k == 'n' || k == 'N') {
-    routerPage = (routerPage == R_PAGE_TRAFFIC) ? R_PAGE_NODES : R_PAGE_TRAFFIC;
+    routerPage = static_cast<RouterPage>((routerPage + 1) % 6);
     dirty = true;
     return false;
   }
@@ -386,6 +434,24 @@ bool routerKey(char k) {
     if (k == 'r' || k == 'R') {
       version[0] = 0; tick = 0; job.request();
     }
+  } else if (routerPage == R_PAGE_FLOW) {
+    if (k == 'r' || k == 'R') { tick = 0; job.request(); }
+    if (k == ';' || k == ',' || k == '.' || k == '/') {
+      int step = (k == ';' || k == ',') ? -1 : 1;
+      int candidate = flowFocus < 0 ? (step > 0 ? 11 : 0) : flowFocus;
+      for (int n = 0; n < 12; ++n) {
+        candidate = (candidate + step + 12) % 12;
+        if (flow.counts[candidate/4][candidate%4]) { flowFocus = candidate; break; }
+      }
+    }
+  } else if (routerPage == R_PAGE_TYPES) {
+    if (k == 'r' || k == 'R') { tick = 0; job.request(); }
+    if (k == 'm' || k == 'M') typeByBytes = !typeByBytes;
+  } else if (routerPage == R_PAGE_HIST) {
+    if (k == 'r' || k == 'R') { tick = 0; job.request(); }
+  } else if (routerPage == R_PAGE_HOSTS) {
+    if (k == 'r' || k == 'R') { tick = 0; job.request(); }
+    if (k == 'm' || k == 'M') hostByBytes = !hostByBytes;
   } else { // R_PAGE_NODES
     if (k == ';' || k == ',') { // UP
       if (nodeCursor > 0) {
@@ -587,7 +653,7 @@ static void drawRouterTraffic() {
               : delayMs < 150   ? 0x07E0
               : delayMs < 300   ? 0xFDA0
                                 : 0xF800;
-  snprintf(b, sizeof(b), "%d", conns);                rStat(4,   91, 56, 27, "CONNS", b, TFT_WHITE);
+  snprintf(b, sizeof(b), "%s%d", flowLimited ? ">=" : "", conns);                rStat(4,   91, 56, 27, "CONNS", b, TFT_WHITE);
   snprintf(b, sizeof(b), "%ldM", memInuse / 1048576); rStat(63,  91, 56, 27, "MEM",   b, 0xCE79);
   snprintf(b, sizeof(b), "%dms", delayMs);            rStat(122, 91, 56, 27, "PING",  b, dc);
   rStat(181, 91, 55, 27, "NODE", nodeName[0] ? trunc(String(nodeName), 8).c_str() : "--", 0xFDA0);
@@ -615,7 +681,7 @@ static void drawRouterTraffic() {
 
   // 右侧彩色快捷键 (绝对坐标)
   cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("N", 112, 127);
-  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("nodes", 120, 127);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("flow", 120, 127);
 
   cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("R", 158, 127);
   cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("ref", 166, 127);
@@ -740,11 +806,255 @@ static void drawRouterNodes() {
   cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("back", 204, 127);
 }
 
+// Fixed node cards and consistently scaled connection ribbons.
+static void drawRouterFlow() {
+  char status[32];
+  bool stale = !online || flowError.length() || millis() - flowUpdated > 12000;
+  if (stale && flowValid) snprintf(status, sizeof(status), "STALE %d", flow.total);
+  else if (flowLimited && flowValid) snprintf(status, sizeof(status), "PART >=%d", flow.total);
+  else snprintf(status, sizeof(status), "%d CONNS", flow.total);
+  cv.setTextSize(1);
+  String title = "Route Flow";
+  if (flowValid && flowFocus >= 0) {
+    int c = flowFocus/4, i = flowFocus%4;
+    title = i == 3 ? String("OTHER") : flow.names[c][i];
+  }
+  title = truncPx(title, SW - 20 - cv.textWidth(flowValid ? status : "WAIT"));
+  drawPageHeader(title.c_str(), flowValid ? status : "WAIT", stale ? TFT_ORANGE : TFT_GREEN);
+  cv.setTextDatum(top_left);
+  const int xs[3] = {4, 91, 178};
+  const char* headings[3] = {"SOURCE", "RULE", "EXIT"};
+  for (int c = 0; c < 3; ++c) {
+    cv.setTextColor(0x8410, TFT_BLACK);
+    cv.drawString(headings[c], xs[c], 17);
+  }
+  if (!flowValid || !flow.total) {
+    cv.setTextDatum(middle_center);
+    cv.setTextColor(stale ? TFT_ORANGE : TFT_LIGHTGREY, TFT_BLACK);
+    cv.drawString(!online ? "Router offline" : flowError.length() ? "Connections fetch failed" :
+                  !flowValid ? "Loading connections..." : "No active connections", SW / 2, 70);
+  } else {
+    // Fixed rows keep rare categories legible. All ribbons use the same scale;
+    // the busiest node occupies at most 20 pixels of its 26-pixel row.
+    const int rowH = 26, cardH = 24;
+    int maximum = 1;
+    for (int c = 0; c < 3; ++c) for (int i = 0; i < 4; ++i)
+      if (flow.counts[c][i] > maximum) maximum = flow.counts[c][i];
+    auto ribbonY = [&](int col, int row, int used) {
+      int center = 30 + row * rowH + cardH/2;
+      return center - flow.counts[col][row] * 20 / maximum / 2 + used * 20 / maximum;
+    };
+    const uint16_t colors[4] = {0x05EA, 0x03BF, 0xFCA0, 0x8410};
+    const uint16_t ribbonColors[4] = {0x02C5, 0x01D0, 0x8240, 0x4208};
+    for (int gap = 0; gap < 2; ++gap) {
+      int srcUsed[4] = {}, dstUsed[4] = {};
+      for (int a = 0; a < 4; ++a) for (int b = 0; b < 4; ++b) {
+        int n = flow.links[gap][a][b];
+        if (!n) continue;
+        int sy = ribbonY(gap, a, srcUsed[a]);
+        int ey = ribbonY(gap+1, b, dstUsed[b]);
+        int sh = ribbonY(gap, a, srcUsed[a]+n) - sy;
+        int eh = ribbonY(gap+1, b, dstUsed[b]+n) - ey;
+        srcUsed[a] += n; dstUsed[b] += n;
+        int x0 = xs[gap] + 60, x1 = xs[gap+1];
+        for (int x = x0; x < x1; ++x) {
+          int t = (x-x0) * 256 / (x1-x0);
+          int u = t*t*(768-2*t) / 65536;
+          int y = sy + (ey-sy)*u/256;
+          int h = sh + (eh-sh)*u/256;
+          cv.drawFastVLine(x, y, h > 0 ? h : 1, ribbonColors[a]);
+        }
+      }
+    }
+    for (int c = 0; c < 3; ++c) for (int i = 0; i < 4; ++i) {
+      int count = flow.counts[c][i];
+      if (!count) continue;
+      int y = 30 + i * rowH;
+      cv.fillRoundRect(xs[c], y, 60, cardH, 2, 0x0821);
+      cv.drawRoundRect(xs[c], y, 60, cardH, 2,
+                       flowFocus == c*4+i ? TFT_WHITE : 0x18C3);
+      cv.fillRect(xs[c], y+3, 2, cardH-6, colors[i]);
+      String label = i == 3 ? String("OTHER") : flow.names[c][i];
+      if (c == 0 && label.length() > 9) label = label.substring(label.length()-9);
+      cv.setTextDatum(top_left); cv.setTextColor(TFT_WHITE, 0x0821);
+      cv.drawString(truncPx(label, 54), xs[c]+4, y+4);
+      char countText[16];
+      snprintf(countText, sizeof(countText), "%d", count);
+      cv.setTextColor(colors[i], 0x0821);
+      cv.drawString(countText, xs[c]+4, y+14);
+    }
+  }
+
+}
+
+static void drawRouterTypes() {
+  bool stale = !online || flowError.length() || millis() - flowUpdated > 12000;
+  const char* metric = typeByBytes ? "BYTES" : "COUNT";
+  char status[32];
+  snprintf(status, sizeof(status), "%s%s", !flowValid ? "WAIT " : stale ? "STALE " :
+           flowLimited ? "PART " : "", metric);
+  drawPageHeader("Traffic Types", status, stale ? TFT_ORANGE : TFT_GREEN);
+  cv.setTextSize(1);
+  if (!flowValid || !flow.total) {
+    cv.setTextDatum(middle_center);
+    cv.setTextColor(stale ? TFT_ORANGE : TFT_LIGHTGREY, TFT_BLACK);
+    cv.drawString(!online ? "Router offline" : flowError.length() ? "Connections fetch failed" :
+                  !flowValid ? "Loading connections..." : "No active connections", SW/2, 70);
+    return;
+  }
+  const char* networks[3] = {"TCP", "UDP", "UNKNOWN"};
+  const uint16_t colors[5] = {0x07E0, 0x07FF, 0xFDA0, 0xB81F, 0x8410};
+  for (int i = 0; i < 3; ++i) {
+    int x = 4 + i*79;
+    char count[16];
+    snprintf(count, sizeof(count), "%d", typeStats.network[i]);
+    rStat(x, 16, 74, 29, networks[i], count, i == 2 ? 0x8410 : colors[i]);
+  }
+  cv.setTextDatum(top_left); cv.setTextColor(0x8410, TFT_BLACK);
+  cv.drawString(typeByBytes ? "ACTIVE CONN BYTES / PORT" : "ACTIVE CONNECTIONS / PORT", 6, 49);
+  const char* labels[5] = {"TCP:443", "UDP:443", "PORT:80", "PORT:53", "OTHER"};
+  uint64_t total = typeByBytes ? typeStats.totalBytes : uint64_t(flow.total);
+  for (int i = 0; i < 5; ++i) {
+    int y = 61 + i*15;
+    uint64_t value = typeByBytes ? typeStats.bytes[i] : uint64_t(typeStats.ports[i]);
+    // Floating point scaling avoids overflow for long-lived large transfers.
+    int width = total ? int(double(value)/double(total)*108) : 0;
+    if (width > 108) width = 108;
+    cv.setTextDatum(middle_left); cv.setTextColor(colors[i], TFT_BLACK);
+    cv.drawString(labels[i], 6, y+5);
+    cv.fillRoundRect(65, y+1, 108, 9, 2, 0x0821);
+    if (value) cv.fillRoundRect(65, y+1, width > 0 ? width : 1, 9, 2, colors[i]);
+    String text;
+    if (typeByBytes) text = fmtBytes(value);
+    else text = String(typeStats.ports[i]);
+    cv.setTextDatum(middle_right); cv.setTextColor(TFT_WHITE, TFT_BLACK);
+    cv.drawString(truncPx(text, 60), SW-5, y+5);
+  }
+}
+
+static void drawRouterHosts() {
+  bool stale = !online || flowError.length() || millis() - flowUpdated > 12000;
+  char status[32];
+  snprintf(status, sizeof(status), "%s%s", !flowValid ? "WAIT " : stale ? "STALE " :
+           flowLimited ? "PART " : "", hostByBytes ? "BYTES" : "COUNT");
+  drawPageHeader("Top Hosts", status, stale ? TFT_ORANGE : TFT_GREEN);
+  cv.setTextSize(1);
+  if (!flowValid || !hostStats.total) {
+    cv.setTextDatum(middle_center);
+    cv.setTextColor(stale ? TFT_ORANGE : TFT_LIGHTGREY, TFT_BLACK);
+    cv.drawString(!online ? "Router offline" : flowError.length() ? "Connections fetch failed" :
+                  !flowValid ? "Loading connections..." : "No active connections", SW/2, 70);
+    return;
+  }
+  int top[5];
+  int n = topRouterHosts(hostStats, hostByBytes, top, 5);
+  uint64_t maxV = 1;
+  for (int i = 0; i < n; ++i) {
+    const auto& sl = hostStats.slots[top[i]];
+    uint64_t v = hostByBytes ? sl.bytes : uint64_t(sl.count);
+    if (v > maxV) maxV = v;
+  }
+  for (int i = 0; i < n; ++i) {
+    const auto& sl = hostStats.slots[top[i]];
+    int y = 17 + i * 21;
+    uint64_t v = hostByBytes ? sl.bytes : uint64_t(sl.count);
+    int barW = SW - 12;
+    int w = maxV ? int(double(v) / double(maxV) * barW) : 0;
+    if (w > barW) w = barW;
+    cv.fillRoundRect(6, y + 17, barW, 2, 1, 0x0821);
+    if (w > 0) cv.fillRoundRect(6, y + 17, w, 2, 1, 0x07FF);
+
+    cv.setTextDatum(top_left); cv.setTextColor(TFT_WHITE, TFT_BLACK);
+    cv.drawString(truncPx(String(sl.host), 150), 6, y);
+    String val = hostByBytes ? fmtBytes(sl.bytes) : String(sl.count);
+    cv.setTextDatum(top_right); cv.setTextColor(TFT_GREEN, TFT_BLACK);
+    cv.drawString(truncPx(val, 65), SW - 6, y);
+    cv.setTextDatum(top_left); cv.setTextColor(0x8410, TFT_BLACK);
+    char meta[40];
+    snprintf(meta, sizeof(meta), "x%d  %s", sl.count, sl.exit[0] ? sl.exit : "DIRECT");
+    cv.drawString(truncPx(String(meta), 160), 6, y + 8);
+  }
+
+  // 底部快捷键提示
+  cv.setTextDatum(bottom_left); cv.setTextSize(1);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("M", 6, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString(hostByBytes ? "count" : "bytes", 16, SH - 2);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("N", 68, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("next", 76, SH - 2);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("R", 120, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("ref", 128, SH - 2);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("`", 168, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("back", 176, SH - 2);
+}
+
+static void drawHistChart(int y, int h, const char* label, const int32_t* arr,
+                          const char* unit, uint16_t col, bool minZero) {
+  const int gx = 4, gw = 232;
+  cv.fillRoundRect(gx, y, gw, h, 3, CARD_BG);
+  cv.drawRoundRect(gx, y, gw, h, 3, 0x18C3);
+  cv.fillRect(gx, y, 2, h, col);
+
+  int32_t lo, hi;
+  histRange(hist, arr, lo, hi);
+  if (minZero) lo = 0;
+  if (hi - lo < 1) hi = lo + 1;
+
+  for (int i = 0; i < hist.count; ++i) {
+    int x = gx + 4 + i * (gw - 8) / RouterHistory::N;
+    int yy = y + h - 3 - int((long long)(arr[hist.idx(i)] - lo) * (h - 16) / (hi - lo));
+    cv.drawFastVLine(x, yy, y + h - 2 - yy, 0x0A24);
+    cv.drawPixel(x, yy, col);
+  }
+
+  cv.setTextDatum(top_left); cv.setTextColor(col, CARD_BG);
+  cv.drawString(label, gx + 6, y + 3);
+
+  char v[40];
+  int32_t cur = hist.count ? arr[hist.idx(hist.count - 1)] : 0;
+  snprintf(v, sizeof(v), "%ld%s [lo %ld, hi %ld]", (long)cur, unit, (long)lo, (long)hi);
+  cv.setTextDatum(top_right); cv.setTextColor(TFT_LIGHTGREY, CARD_BG);
+  cv.drawString(v, gx + gw - 6, y + 3);
+}
+
+static void drawRouterHist() {
+  bool stale = !online;
+  char status[24];
+  int durM = hist.count * 12 / 60;
+  snprintf(status, sizeof(status), "%s%dm (%d pts)", stale ? "OFF " : "", durM, hist.count);
+  drawPageHeader("History", status, stale ? TFT_ORANGE : TFT_GREEN);
+  cv.setTextSize(1);
+  if (hist.count < 2) {
+    cv.setTextDatum(middle_center);
+    cv.setTextColor(stale ? TFT_ORANGE : TFT_LIGHTGREY, TFT_BLACK);
+    cv.drawString(!online ? "Router offline" : "Collecting history samples...", SW / 2, 70);
+    return;
+  }
+  drawHistChart(17, 51, "MEM", hist.mem, "KB", 0x07FF, false);
+  drawHistChart(71, 51, "CONNS", hist.conns, "", 0xFDA0, true);
+
+  // 底部快捷键提示
+  cv.setTextDatum(bottom_left); cv.setTextSize(1);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("N", 6, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("next", 14, SH - 2);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("R", 58, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("ref", 66, SH - 2);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("`", 106, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("back", 114, SH - 2);
+}
+
 void drawRouter() {
   job.markShown();
   cv.fillScreen(TFT_BLACK);
 
-  if (routerPage == R_PAGE_NODES) {
+  if (routerPage == R_PAGE_FLOW) {
+    drawRouterFlow();
+  } else if (routerPage == R_PAGE_TYPES) {
+    drawRouterTypes();
+  } else if (routerPage == R_PAGE_HIST) {
+    drawRouterHist();
+  } else if (routerPage == R_PAGE_HOSTS) {
+    drawRouterHosts();
+  } else if (routerPage == R_PAGE_NODES) {
     drawRouterNodes();
   } else {
     drawRouterTraffic();

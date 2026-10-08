@@ -73,7 +73,7 @@ INC="-I stubs -I $GFX -I $AJSON -I $TINYGPS -I $SSH $SDL_CFLAGS"
 # 剩下的界面 + 码表解析是纯逻辑，语法检查能挡住"函数名写错、参数对不上"这类错。
 # ram_profile.cpp 进来是为了另一件事：它整段输出都是格式串，而格式串跟参数类型对不上
 # 在板子上是**静默**的（照样烧得进去，打出来的数是垃圾）。-Werror=format 把它变成硬错。
-for f in globals pages icons ir ir_proto ram_profile clock settings_ui gnss spectrum hash_oven sha512_crypt crypto_engines ssh_app; do
+for f in globals pages icons ir ir_proto ram_profile clock settings_ui gnss spectrum hash_oven sha512_crypt crypto_engines ssh_app odid ridapp; do
   "$CXX" -std=c++17 -fsyntax-only -Wformat -Werror=format $DEFS $INC "$ROOT/src/$f.cpp" || {
     echo "!! src/$f.cpp 语法检查没过（加了 app 的话，多半是 APPS[]/GROUPS[] 对不上）" >&2
     exit 1
@@ -87,6 +87,7 @@ done
   $ROOT/src/globals.cpp $ROOT/src/ui_common.cpp $ROOT/src/clock.cpp $ROOT/src/weather.cpp $ROOT/src/moon.cpp $ROOT/src/astro.cpp $ROOT/src/pages.cpp \
   $ROOT/src/skyview.cpp $ROOT/src/adsb.cpp $ROOT/src/typhoon.cpp $ROOT/src/worldmap.cpp $ROOT/src/sats.cpp $ROOT/src/router.cpp $ROOT/src/stopwatch.cpp $ROOT/src/quake.cpp $ROOT/src/fx.cpp $ROOT/src/okx.cpp $ROOT/src/icons.cpp $ROOT/src/settings_ui.cpp $ROOT/src/ram_profile.cpp \
   $ROOT/src/gnss.cpp $ROOT/src/spectrum.cpp $ROOT/src/hash_oven.cpp $ROOT/src/sha512_crypt.cpp $ROOT/src/crypto_engines.cpp $ROOT/src/ssh_app.cpp \
+  $ROOT/src/odid.cpp $ROOT/src/ridapp.cpp \
   $GFX_SRC \
   $SDL_LIBS \
   -o build/uisim

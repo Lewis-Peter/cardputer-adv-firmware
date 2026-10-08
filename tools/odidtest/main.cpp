@@ -84,6 +84,87 @@ static void mkOperatorId(uint8_t* m, const char* op) {
 int main() {
   const char* ID = "1581F5FMD230700ABCDE";
 
+  // ---------- 真机：DJI Air 3 室内开机、未定位（2026-10-07 抓的原始载荷）----------
+  // Location 经纬度全 0（无效），但 byte1 高 4 位是 1=地面。以前坐标不过关就整条丢，
+  // 状态跟着没了，屏幕上状态徽章一直是 "?"。
+  {
+    printf("真机 Air 3 无定位：状态不该被坐标无效连带丢掉\n");
+    const uint8_t air3[] = {
+      0x43,0xF1,0x19,0x03,0x01,0x12,0x31,0x35,0x38,0x31,0x46,0x36,0x4E,0x38,0x43,0x32,
+      0x33,0x41,0x51,0x30,0x30,0x33,0x35,0x43,0x41,0x4A,0x00,0x00,0x00,0x11,0x16,0xB5,
+      0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x84,0x07,0x00,0x00,0xD0,0x07,
+      0x00,0x00,0xFF,0xFF,0x00,0x00,0x41,0x09,0x5D,0x4C,0x56,0x17,0x88,0xD8,0x31,0x46,
+      0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x01,0xD0,0x07,0x00,0x00,0x00,0x00,0x00 };
+    OdidResult r;
+    ck(odidDecode(air3, sizeof(air3), r), "decode 成功（靠 BasicID / System）");
+    ck(r.haveBasic && strcmp(r.uasId, "1581F6N8C23AQ0035CAJ") == 0, "序列号");
+    ck(!r.haveLoc, "坐标无效，不报位置");
+    ck(r.haveStatus && r.opStatus == 1, "状态 = 地面(1)，不再丢");
+    ck(r.haveAlt && fabs(r.altGeo - (-38.0)) < 0.3, "几何高度无值时退回气压高 -38m");
+    ck(r.haveHeight && fabs(r.height) < 0.3 && r.heightIsAgl, "相对高度 0m，bit2=AGL");
+    ck(r.haveSpeed && r.speed == 0.0f, "速度 0 是真值");
+    ck(r.heading < 0, "航向字节 181 超出 0~179，视为未知");
+  }
+
+  // ---------- Authentication（类型 2）：分页签名 ----------
+  {
+    printf("Authentication 分页\n");
+    auto mkAuth = [](uint8_t* m, uint8_t type, uint8_t page, uint8_t last, uint8_t len, uint32_t ts) {
+      memset(m, 0, 25);
+      m[0] = (0x2 << 4) | 2;
+      m[1] = (uint8_t)((type << 4) | page);
+      if (page == 0) { m[2] = last; m[3] = len; put32(m + 4, (int32_t)ts); }
+      else           { for (int i = 2; i < 25; i++) m[i] = (uint8_t)i; }
+    };
+    auto pack = [&](uint8_t* buf, uint8_t* a, uint8_t* b) {   // BasicID + 两页 Auth
+      buf[0] = 0x07;
+      uint8_t* pk = buf + 1;
+      pk[0] = (0xF << 4) | 2; pk[1] = 25; pk[2] = 3;
+      mkBasicId(pk + 3, ID, 1, 2);
+      memcpy(pk + 3 + 25, a, 25); memcpy(pk + 3 + 50, b, 25);
+    };
+    uint8_t p0[25], p1[25], p0new[25], buf[1 + 3 + 75];
+    mkAuth(p0, 2, 0, 1, 40, 123456);
+    mkAuth(p1, 2, 1, 0, 0, 0);
+    pack(buf, p0, p1);
+    OdidResult r;
+    ck(odidDecode(buf, sizeof(buf), r), "含两页 Auth 的 Pack 解码成功");
+    ck(r.haveAuth && r.authType == 2, "类型 = 运营人 ID 签名");
+    ck(r.authPages == 0x3, "同一包里的两页都记下（位图 0b11）");
+    ck(r.authHavePage0 && r.authLastPage == 1 && r.authLen == 40 && r.authTime == 123456, "页 0：总页数/长度/时间戳");
+    ck(strcmp(odidAuthTypeName(r.authType), "Operator sig") == 0, "类型名");
+
+    // 跨帧累积：这一帧只有页 0，下一帧只有页 1
+    OdidResult acc, f0, f1;
+    uint8_t one[1 + 25];
+    one[0] = 0x07; memcpy(one + 1, p0, 25);
+    ck(odidDecode(one, sizeof(one), f0) && f0.haveAuth, "单条 Auth 消息解码");
+    odidMerge(acc, f0);
+    ck(acc.authPages == 0x1, "只收到页 0");
+    memcpy(one + 1, p1, 25);
+    ck(odidDecode(one, sizeof(one), f1), "单条页 1 解码");
+    odidMerge(acc, f1);
+    ck(acc.authPages == 0x3 && acc.authLastPage == 1, "跨帧累积出两页，页 0 的信息保留");
+
+    // 新一轮签名（页 0 时间戳变了）：旧页位图作废
+    mkAuth(p0new, 2, 0, 1, 40, 999999);
+    memcpy(one + 1, p0new, 25);
+    OdidResult f2;
+    ck(odidDecode(one, sizeof(one), f2), "新一轮页 0 解码");
+    odidMerge(acc, f2);
+    ck(acc.authPages == 0x1 && acc.authTime == 999999, "时间戳变了，位图重置、不把两轮混成收齐");
+
+    // 类型 0（无认证）/ 保留类型 / 页 0 里总页数越界：都不当成 Auth
+    OdidResult none;
+    uint8_t bad[25];
+    mkAuth(bad, 0, 0, 0, 0, 0); memcpy(one + 1, bad, 25);
+    ck(!odidDecode(one, sizeof(one), none) && !none.haveAuth, "类型 0 不算 Auth");
+    mkAuth(bad, 7, 0, 0, 0, 0); memcpy(one + 1, bad, 25);
+    ck(!odidDecode(one, sizeof(one), none) && !none.haveAuth, "保留类型 7 不算 Auth");
+    mkAuth(bad, 1, 0, 16, 0, 0); memcpy(one + 1, bad, 25);
+    ck(!odidDecode(one, sizeof(one), none) && !none.haveAuth, "最后一页序号 > 15 拒绝");
+  }
+
   // ---------- 1. Pack（三条打包），前面带 beacon 那一字节消息计数器 ----------
   {
     printf("1. Message Pack + beacon 计数字节\n");

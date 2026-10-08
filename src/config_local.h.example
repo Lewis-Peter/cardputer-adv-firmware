@@ -14,3 +14,8 @@
 // #define CFG_MAP_TILE_WGS84 1
 // 电台内置列表（也可以用 SD 卡 /radio.txt 免重编译）：
 // #define CFG_RADIO_PRESETS {"My Station", "http://example.com/stream.mp3", "Jazz"},
+// SSH 首次使用的默认连接信息（设备上改后存 NVS）：
+// #define CFG_SSH_DEFAULT_NAME "myserver"
+// #define CFG_SSH_DEFAULT_HOST "your.server.example"
+// #define CFG_SSH_DEFAULT_USER "ubuntu"
+// #define CFG_SSH_EXTRA_KEYS , "/myserver.key", "/myserver.pem"

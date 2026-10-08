@@ -38,6 +38,9 @@
 #include "../../src/hash_oven.h"
 #include "../../src/ssh_app.h"
 #include "../../src/sd_files.h"
+#include "../../src/ridapp.h"
+#include "../../src/rid_alert.h"
+#include "../../src/rid_radar.h"
 
 // ---------------- 模拟器桩实现 ----------------
 SimM5 M5;
@@ -63,6 +66,13 @@ void bgFetchDrawIndicator(bool) {}
 NetResolveResult netResolve(const char*, uint32_t) { return NR_OK; }
 
 void btReleaseForOtherApps() {}
+bool btStreamIsActive() { return false; }
+bool btHoldsHeap() { return false; }
+void bootWifiStart() {}
+bool hotspotSuspend() { return false; }
+void hotspotResume() {}
+bool hotspotIsSuspended() { return false; }
+bool chatBusy() { return false; }
 
 namespace kbd {
   void begin() {}
@@ -399,7 +409,37 @@ int main() {
       "\"destination\":{\"iata_code\":\"PVG\",\"latitude\":31.1434,\"longitude\":121.8052}}}}" )},
     {"/memory", "{\"inuse\":0,\"oslimit\":0}\n{\"inuse\":73400320,\"oslimit\":0}"},
     {"/v1/air-quality", "{\"current\":{\"pm10\":86.4,\"pm2_5\":52.7,\"us_aqi\":143,\"ozone\":118.0}}"},
-    {"/connections", "{\"connections\":[{\"id\":\"a1\"},{\"id\":\"b2\"},{\"id\":\"c3\"},{\"id\":\"d4\"},{\"id\":\"e5\"},{\"id\":\"f6\"}]}"},
+    {"/connections", R"FLOW({
+  "connections" : [
+    {"id":"0","metadata":{"sourceIP":"192.168.1.10"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"1","metadata":{"sourceIP":"192.168.1.10"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"2","metadata":{"sourceIP":"192.168.1.10"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"3","metadata":{"sourceIP":"192.168.1.10"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"4","metadata":{"sourceIP":"192.168.1.10"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"5","metadata":{"sourceIP":"192.168.1.10"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"6","metadata":{"sourceIP":"192.168.1.10"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"7","metadata":{"sourceIP":"192.168.1.10"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"8","metadata":{"sourceIP":"192.168.1.10"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"9","metadata":{"sourceIP":"192.168.1.11"},"rule":"GeoIP","chains":["DIRECT","Proxy"]},
+    {"id":"10","metadata":{"sourceIP":"192.168.1.11"},"rule":"GeoIP","chains":["DIRECT","Proxy"]},
+    {"id":"11","metadata":{"sourceIP":"192.168.1.11"},"rule":"GeoIP","chains":["DIRECT","Proxy"]},
+    {"id":"12","metadata":{"sourceIP":"192.168.1.11"},"rule":"GeoIP","chains":["DIRECT","Proxy"]},
+    {"id":"13","metadata":{"sourceIP":"192.168.1.11"},"rule":"GeoIP","chains":["DIRECT","Proxy"]},
+    {"id":"14","metadata":{"sourceIP":"192.168.1.11"},"rule":"GeoIP","chains":["DIRECT","Proxy"]},
+    {"id":"15","metadata":{"sourceIP":"192.168.1.10"},"rule":"Match","chains":["JP-02","Proxy"]},
+    {"id":"16","metadata":{"sourceIP":"192.168.1.10"},"rule":"Match","chains":["JP-02","Proxy"]},
+    {"id":"17","metadata":{"sourceIP":"192.168.1.10"},"rule":"Match","chains":["JP-02","Proxy"]},
+    {"id":"18","metadata":{"sourceIP":"192.168.1.10"},"rule":"Match","chains":["JP-02","Proxy"]},
+    {"id":"19","metadata":{"sourceIP":"192.168.1.12"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"20","metadata":{"sourceIP":"192.168.1.12"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"21","metadata":{"sourceIP":"192.168.1.12"},"rule":"RuleSet","chains":["HK-01","Proxy"]},
+    {"id":"22","metadata":{"sourceIP":"192.168.1.13"},"rule":"Domain","chains":["REJECT","Proxy"]},
+    {"id":"23","metadata":{"sourceIP":"192.168.1.13"},"rule":"Domain","chains":["REJECT","Proxy"]},
+    {"id":"24","metadata":{"sourceIP":"192.168.1.11"},"rule":"RuleSet","chains":["JP-02","Proxy"]},
+    {"id":"25","metadata":{"sourceIP":"192.168.1.11"},"rule":"RuleSet","chains":["JP-02","Proxy"]},
+    {"id":"26","metadata":{"sourceIP":"192.168.1.11"},"rule":"RuleSet","chains":["JP-02","Proxy"]}
+  ]
+})FLOW"},
     {"/proxies/Proxy", "{\"now\":\"HK-Premium-03\"}"},
     {"/version", "{\"version\":\"1.18.8\"}"},
     {"/proxies/HK-Premium-03/delay", "{\"delay\":143}"}
@@ -519,6 +559,70 @@ int main() {
     routerUpdate();
   }
   shoot("out/router.png",             drawRouter,    SCREEN_ROUTER);
+  routerKey('n');
+  shoot("out/router_2_flow.png", drawRouter, SCREEN_ROUTER);
+  routerKey('.');
+  shoot("out/router_2_flow_detail.png", drawRouter, SCREEN_ROUTER);
+  // Real-device regression: tiny source buckets and a dominant OTHER bucket.
+  String skew = "{\"connections\":[";
+  for (int i = 0; i < 82; ++i) {
+    if (i) skew += ',';
+    const char* source = i == 0 ? "192.168.50.10" : i < 10 ? "192.168.50.104" :
+                         i < 16 ? "192.168.50.105" : "192.168.50.106";
+    const char* rule = i < 45 ? "RuleSet" : i < 76 ? "Match" : "DomainSuffix";
+    const char* exit = i < 9 ? "Oracle" : i < 25 ? "Oracle-v6" : "DIRECT";
+    skew += "{\"metadata\":{\"sourceIP\":\"";
+    skew += source;
+    skew += "\"},\"rule\":\"";
+    skew += rule;
+    skew += "\",\"chains\":[\"";
+    skew += exit;
+    skew += "\"]}";
+  }
+  skew += "]}";
+  simSetResponse("/connections", skew);
+  routerKey('r');
+  simAdvanceMillis(1550); routerUpdate();
+  shoot("out/router_2_flow_skew.png", drawRouter, SCREEN_ROUTER);
+  // Malformed snapshots must preserve the last good topology, then an empty
+  // (whitespace-separated) array must clear it successfully.
+  simSetResponse("/connections", "{\"connections\": [{broken]}");
+  routerKey('r');
+  simAdvanceMillis(1550); routerUpdate();
+  shoot("out/router_2_flow_stale.png", drawRouter, SCREEN_ROUTER);
+  simSetResponse("/connections", "{\"connections\" : []}");
+  routerKey('r');
+  simAdvanceMillis(1550); routerUpdate();
+  shoot("out/router_2_flow_empty.png", drawRouter, SCREEN_ROUTER);
+  routerKey('n');
+  shoot("out/router_3_types_empty.png", drawRouter, SCREEN_ROUTER);
+  simSetResponse("/connections", R"TYPES({"connections":[
+    {"metadata":{"network":"tcp","destinationPort":"443","host":"api.github.com"},"download":4294967296,"upload":100,"chains":["HK-Premium-03","Proxy"]},
+    {"metadata":{"network":"udp","destinationPort":"443","host":"gateway.icloud.com"},"download":120000000,"upload":500000,"chains":["DIRECT"]},
+    {"metadata":{"network":"tcp","destinationPort":80,"host":"archive.ubuntu.com"},"download":2000000,"upload":3000,"chains":["HK-Premium-03","Proxy"]},
+    {"metadata":{"network":"udp","destinationPort":"53","destinationIP":"1.1.1.1"},"download":8000,"upload":1000,"chains":["DIRECT"]},
+    {"metadata":{"network":"tcp","destinationPort":"22","host":"srv1.us-east.compute.internal"},"download":90000,"upload":10000,"chains":["US-Silicon-01"]},
+    {"metadata":{"network":"tcp","destinationPort":"443","host":"very-long-subdomain-tracker.analytics.google.com"},"download":54000,"upload":2400,"chains":["JP-Tokyo-02"]},
+    {"metadata":{},"download":400,"upload":600}
+  ]})TYPES");
+  routerKey('r');
+  simAdvanceMillis(1550); routerUpdate();
+  shoot("out/router_3_types_count.png", drawRouter, SCREEN_ROUTER);
+  routerKey('m');
+  shoot("out/router_3_types_bytes.png", drawRouter, SCREEN_ROUTER);
+  routerKey('n');
+  shoot("out/router_4_nodes.png", drawRouter, SCREEN_ROUTER);
+  routerKey('n');
+  shoot("out/router_5_hosts_bytes.png", drawRouter, SCREEN_ROUTER);
+  routerKey('m');
+  shoot("out/router_5_hosts_count.png", drawRouter, SCREEN_ROUTER);
+  routerKey('n');
+  // 模拟历史采样积累：推进多次 poll 产生连续的 MEM 和 CONNS 曲线
+  for (int h = 0; h < 25; h++) {
+    simAdvanceMillis(1550);
+    routerUpdate();
+  }
+  shoot("out/router_6_hist.png", drawRouter, SCREEN_ROUTER);
   stopwatchEnter();
   shoot("out/stopwatch.png",          drawStopwatch, SCREEN_STOPWATCH);
 
@@ -645,6 +749,35 @@ int main() {
   shoot("out/gnss_7_map_z8_nosdtile.png", drawGnssMap, SCREEN_GNSS_MAP);
   gnssMapExit();
   WiFi.reconnect();
+
+  // ==================== Remote ID (Drone ID) ====================
+  // 1) List view with injected sample drones & valid GNSS fix
+  ridAppEnter();
+  ridAppInjectSample();
+  simFeedGnssFix(39.1500, 117.7600, 0.0f, 10.0f); // 距 sample A 约 700m
+  ridAppUpdate();
+  shoot("out/rid_1_list.png", drawRidApp, SCREEN_RID);
+
+  // 2) Radar view with fix
+  ridAppKey('m'); // 切雷达
+  ridAppUpdate();
+  shoot("out/rid_2_radar.png", drawRidApp, SCREEN_RID);
+
+  // 3) Radar view without fix
+  // 模拟定位超时失效 (maxAgeMs = 3000ms)
+  simAdvanceMillis(4000);
+  shoot("out/rid_2_radar_nofix.png", drawRidApp, SCREEN_RID);
+
+  // 4) Alert active on header
+  // 恢复 fix，将告警级别设为 1000m (a 键)，sample A (约 700m) 进入告警圈，切回列表视图看 ALERT 顶栏
+  simFeedGnssFix(39.1500, 117.7600, 0.0f, 10.0f);
+  ridAppKey('a'); // 200m
+  ridAppKey('a'); // 500m
+  ridAppKey('a'); // 1000m
+  ridAppKey('m'); // 切回列表
+  ridAppUpdate();
+  shoot("out/rid_1_list_alert.png", drawRidApp, SCREEN_RID);
+  ridAppExit();
 
   // ==================== Spectrum ====================
   shoot("out/spectrum_0_mic_unavailable.png", drawSpectrum, SCREEN_SPECTRUM);

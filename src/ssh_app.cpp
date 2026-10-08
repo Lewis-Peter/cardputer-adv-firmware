@@ -1,4 +1,5 @@
 #include "ssh_app.h"
+#include "config.h"
 #include "globals.h"
 #include "keyboard_adv.h"
 #include "ui_common.h"
@@ -35,10 +36,10 @@ enum SshState {
 static volatile SshState sshState = SSH_ST_CONFIG;
 
 // 配置字段
-static char sshName[32] = "server";
-static char sshHost[64] = "";
+static char sshName[32] = CFG_SSH_DEFAULT_NAME;
+static char sshHost[64] = CFG_SSH_DEFAULT_HOST;
 static uint16_t sshPort = 22;
-static char sshUser[32] = "ubuntu";
+static char sshUser[32] = CFG_SSH_DEFAULT_USER;
 static char sshPass[64] = "";
 static char sshKeyFile[64] = "";
 
@@ -610,6 +611,7 @@ static String findSshKeyOnSD() {
     "/ssh/id_ed25519",
     "/.ssh/id_rsa",
     "/ssh/id_rsa"
+    CFG_SSH_EXTRA_KEYS
   };
 
   for (const char* path : CANDIDATES) {
@@ -981,18 +983,18 @@ void sshEnter() {
   connBgDrawn = false;
 
   // 从 NVS 恢复
-  String name = loadString("ssh", "name", "server");
+  String name = loadString("ssh", "name", CFG_SSH_DEFAULT_NAME);
   strncpy(sshName, name.c_str(), sizeof(sshName) - 1);
   sshName[sizeof(sshName) - 1] = '\0';
 
-  String h = loadString("ssh", "host", "");
+  String h = loadString("ssh", "host", CFG_SSH_DEFAULT_HOST);
   strncpy(sshHost, h.c_str(), sizeof(sshHost) - 1);
   sshHost[sizeof(sshHost) - 1] = '\0';
 
   int p = loadInt("ssh", "port", 22);
   sshPort = (p > 0 && p <= 65535) ? (uint16_t)p : 22;
 
-  String u = loadString("ssh", "user", "ubuntu");
+  String u = loadString("ssh", "user", CFG_SSH_DEFAULT_USER);
   strncpy(sshUser, u.c_str(), sizeof(sshUser) - 1);
   sshUser[sizeof(sshUser) - 1] = '\0';
 

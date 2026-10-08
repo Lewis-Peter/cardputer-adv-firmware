@@ -116,6 +116,9 @@ Total capacity: 56; currently used: 39; spare slots distributed across SCAN (3) 
 ### Drone ID — 1 Screen + 1 Subscreen
 - Drone Remote ID scanner (dual decoders: ASTM F3411 + Chinese National Standard GB)
 - List view: ID / Flight Status (AIR/GND/EMG/LOST) / Range & Bearing / Altitude / RSSI
+- **Radar view**: `m` toggles list/radar (north-up, auto range 100 m – 50 km, needs a GNSS fix); the selected aircraft shows its readout, a heading line and a box for the pilot/home position
+- **Proximity alert**: `a` cycles the alert distance (off / 200 / 500 / 1000 / 2000 m, default off), `b` toggles the alert sound (default on); both are stored in NVS. When an aircraft enters the circle or a new EMG status appears, the LED flashes red for 3 s with a tone (enter = two rising notes, EMG = three high beeps); a soft beep repeats every 8 s while inside. It re-arms only after the aircraft moves out past 1.2× the distance. Evaluated only while the Drone ID page is open; with sound muted (Debug / volume 0) it only flashes.
+- **Operator ID hint**: on the Details page the `Reg` line is colored by observation — orange `not broadcast` if no Operator ID was received after ≥15 s and ≥8 packets; yellow with a `?` if it was broadcast but looks like a placeholder (all spaces / one repeated character / a copy of the airframe serial); `--` while it has not been observed long enough. **This is an observation hint, not a compliance verdict** — no country- or region-specific ID format checks are done. The serial JSON gains `"opid":"ok|none|suspect"` (omitted while pending).
 - `;`/`.` selects · `r` clears · `Enter` → **Details** subscreen (coordinates, speed, heading, operator location, registration)
 - Locks channel upon target discovery (channel hopping drops ~92% of frames)
 - Streams `RIDPKT {json}` over serial, compatible with `tools/rid_view.py`
@@ -130,7 +133,7 @@ Total capacity: 56; currently used: 39; spare slots distributed across SCAN (3) 
   - `8x8` (30 cols × 15 rows, wide font balancing clarity with row count)
   - `6x8` (40 cols × 15 rows, compact font maximizing terminal width to 40 columns)
   Renegotiates PTY window dimensions with the remote server in real time (`TIOCSWINSZ` / `ssh_channel_change_pty_size`), ensuring terminal tools like htop and vim reformat cleanly
-- **Authentication**: Supports password authentication and automatic discovery of private keys (RSA/ED25519) on SD cards (scans 13 common paths such as `/id_ed25519`, `/id_rsa`, `/ssh.key`, or specified via `/ssh.cfg`; supports key passphrases)
+- **Authentication**: Supports password authentication and automatic discovery of private keys (RSA/ED25519) on SD cards (scans common paths such as `/id_ed25519`, `/id_rsa`, `/ssh.key` (more can be added via `CFG_SSH_EXTRA_KEYS` in `config_local.h`), or specified via `/ssh.cfg`; supports key passphrases)
 - **Serial Terminal Passthrough**: When connected via USB serial, terminal shell input passes directly to the remote SSH session alongside standard system management commands
 - **Keybindings & Connection Safety**: `Fn + Tab` = Esc, `Fn + ; . , /` = Arrow keys, `Fn + [ / ]` = Home/End, `Fn + Backspace` = Delete, `Ctrl + Letter` combinations; exit anytime via `Fn + \`` or physical `G0` (guarded by CAS ownership checks preventing double-free panics)
 
@@ -234,7 +237,7 @@ Total capacity: 56; currently used: 39; spare slots distributed across SCAN (3) 
 - **URL Editor** (`SCREEN_RADIO_URL`): Accepts `http://` streams (≤120 characters)
 - Dual-core cooperative task shutdown prevents lwIP mutex deadlocks; signals timer alarms to yield audio hardware
 
-### Router — 1 Screen
+### Router — 6 Pages (`n` cycles; on Top Hosts `m` toggles bytes/count; History shows memory/connection curves, one point per 12 s, ~24 min)
 - Clash / mihomo status: connection count, active proxy node, version, latency; `r` refreshes; requires `CLASH_*` configuration
 - Node and group names URL-encoded; PUT requests serialized via ArduinoJson
 

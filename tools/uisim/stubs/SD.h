@@ -19,6 +19,7 @@ public:
   bool println(const char*) { return true; }
   size_t write(const uint8_t*, size_t) { return 0; }
   size_t size() { return 0; }
+  void flush() {}
   void close() {}
 };
 
@@ -38,6 +39,8 @@ public:
     return false;
   }
   bool exists(const String& s) { return exists(s.c_str()); }
+  bool mkdir(const char*) { return true; }
+  bool mkdir(const String& s) { return mkdir(s.c_str()); }
   File open(const char*, const char* = FILE_READ) { return File(); }
   File open(const String& s, const char* m = FILE_READ) { return open(s.c_str(), m); }
 };

@@ -142,6 +142,10 @@ bool fetchJsonStreamArray(Client& client, const String& url, const char* arrayKe
   };
 
   int firstChar = peekNonWs();
+  if (firstChar == ':') {
+    st.read();
+    firstChar = peekNonWs();
+  }
   if (firstChar == '[') {
     st.read();
     firstChar = peekNonWs();

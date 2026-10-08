@@ -3,6 +3,10 @@
 #include "ui_common.h"
 #include "wifi_net.h"
 #include "gnss.h"
+#include "rid_radar.h"
+#include "rid_alert.h"
+#include "rid_opid.h"
+#include "led.h"
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <cstring>
@@ -148,10 +152,12 @@ static inline void truncInPlace(char* s, int maxChars) {
 struct Drone {
   uint8_t  mac[6];
   OdidResult r;
-  int8_t   rssi;
+  int8_t   rssi;        // 最近一包的原始值（串口输出用）
+  int16_t  rssiAvgX8;   // 指数平滑 ×8（屏幕显示用）：每包 rssi 抖几 dB，直接显示数字会跳
   uint8_t  chan;
   uint32_t packets;
   uint32_t lastMs;
+  uint32_t firstMs;     // 首次收到的时间，运营人 ID 的"没播"要看观察了多久
   bool injected;        // 来自串口 RIDFAKE 的样本，不是射频收到的
   volatile bool fresh;  // 有新数据还没往串口吐（见 ridStreamPump）
   uint32_t lastEmitMs;
@@ -160,6 +166,18 @@ static const int DRONE_MAX = 12;
 static Drone* drones = nullptr;
 static volatile int droneCount = 0;
 static int selIdx = 0, listTop = 0;
+static bool radarView = false;        // m 键：列表 / 雷达
+
+// ---- 接近告警 ----
+// a 切距离档（关/200/500/1000/2000m），b 开关声音；两项都存 NVS。只在 Drone ID 页开着时评估。
+static int alertLevel = 0;
+static bool alertSound = true;
+static AlertState alertSt[12];
+static uint32_t alertFlashUntilMs = 0;   // 事件发生后红灯闪到这个时刻
+static uint32_t alertLastBeepMs = 0;
+static bool alertLedOwned = false;
+static bool alertAnyInside = false;
+static void alertLedRelease();
 
 // 一段时间没再收到就标成 lost（不删——人可能正想看它最后出现在哪）
 static const uint32_t LOST_MS = 20000;
@@ -230,8 +248,10 @@ static void mergeDrone(const uint8_t* mac, const OdidResult& n, int8_t rssi, uin
     drones[idx].r = OdidResult();
     drones[idx].packets = 0;
     drones[idx].rssi = rssi;
+    drones[idx].rssiAvgX8 = (int16_t)rssi * 8;
     drones[idx].chan = chan;
     drones[idx].lastMs = millis();
+    drones[idx].firstMs = drones[idx].lastMs;
     drones[idx].injected = injected;
     drones[idx].lastEmitMs = 0;
     // ⚠️ 必须最后才让 droneCount 覆盖到这一条。回调跑在 WiFi 任务、绘制跑在主循环，
@@ -242,6 +262,7 @@ static void mergeDrone(const uint8_t* mac, const OdidResult& n, int8_t rssi, uin
   d.packets++;
   if (!injected) streamPkts.fetch_add(1, std::memory_order_relaxed);
   d.rssi = rssi;
+  d.rssiAvgX8 += ((int16_t)rssi * 8 - d.rssiAvgX8) / 8;   // 约 8 包的时间常数
   d.chan = chan;
   d.lastMs = millis();
   if (injected) d.injected = true;
@@ -312,6 +333,11 @@ static void rxStop() {
 }
 
 void ridAppEnter() {
+  alertLevel = loadInt("ridalert", "lvl", 0);
+  if (alertLevel < 0 || alertLevel >= ALERT_LEVEL_N) alertLevel = 0;
+  alertSound = loadBool("ridalert", "snd", true);
+  for (auto& a : alertSt) a = AlertState();
+  alertAnyInside = false;
   if (streamMode) ridStreamStop();   // 正常走不到（PC MODE 里进不了菜单），但两边抢同一块射频，宁可多防一手
   if (!rxStart(0)) {
     screen = SCREEN_MENU;
@@ -321,6 +347,8 @@ void ridAppEnter() {
 }
 
 void ridAppExit() {
+  alertLedRelease();
+  alertFlashUntilMs = 0;
   if (isRecording) {
     ridAppStopRecord();
   }
@@ -354,12 +382,24 @@ void ridAppendOdidFields(char* buf, int cap, int& n, const OdidResult& r) {
   if (r.haveSys)        appendf(buf, cap, n, ",\"plat\":%.7f,\"plon\":%.7f", r.pilotLat, r.pilotLon);
   if (r.haveAstmTime)   appendf(buf, cap, n, ",\"t_hour\":%.1f", r.astmTimeSec);       // 整点后秒数
   if (r.haveGbTime)     appendf(buf, cap, n, ",\"t_ms\":%llu", (unsigned long long)r.gbTimeMs); // Unix 毫秒
+  if (r.haveAuth) {
+    appendf(buf, cap, n, ",\"auth\":%u,\"authp\":%u", (unsigned)r.authType, (unsigned)r.authPages);
+    if (r.authHavePage0)
+      appendf(buf, cap, n, ",\"authn\":%u,\"authlen\":%u,\"autht\":%lu", (unsigned)r.authLastPage + 1,
+              (unsigned)r.authLen, (unsigned long)r.authTime);
+  }
 }
 
 // 一个目标的 JSON。两种外壳，字段名一致：
 //   带屏页（rid_view.py 用）：RIDPKT {"ms":..,"mac":..,"fake":0|1,...,"mylat":..}
 //   PC 协议（cardputer-bridge）：RID {"t":"d","ts":..,"mac":..,...}  —— 协议 v1.1 的数据行都带 ts；
 //     fake 只在注入样本时出现（PC 端要能区分），我方坐标 PC 端自己有，不带。
+// 运营人 ID 观察结果。串口注入的假样本只发一次包，按"包数够了"算，否则永远停在 pending 看不到效果。
+static OpIdState droneOpId(const Drone& d, uint32_t now) {
+  return opidCheck(d.r.haveOperatorId, d.r.operatorId, d.r.uasId, d.r.haveBasic,
+                   now - d.firstMs, d.injected ? OPID_MIN_PKTS : d.packets);
+}
+
 static bool buildDroneJson(char* buf, int cap, const Drone& d, uint32_t now, bool pc) {
   const OdidResult& r = d.r;
   int n = 0;
@@ -377,6 +417,8 @@ static bool buildDroneJson(char* buf, int cap, const Drone& d, uint32_t now, boo
   if (pc) { if (d.injected) appendf(buf, cap, n, ",\"fake\":1"); }
   else    appendf(buf, cap, n, ",\"fake\":%d", d.injected ? 1 : 0);
   ridAppendOdidFields(buf, cap, n, r);
+  const OpIdState opid = droneOpId(d, now);
+  if (opid != OPID_PENDING) appendf(buf, cap, n, ",\"opid\":\"%s\"", opidName(opid));
   if (!pc && gnssHasFix()) appendf(buf, cap, n, ",\"mylat\":%.7f,\"mylon\":%.7f", gnssLat(), gnssLng());
   appendf(buf, cap, n, "}");
 
@@ -471,10 +513,58 @@ void ridStreamStop() {
   Serial.println("RID {\"t\":\"end\"}");
 }
 
+static void alertBeep(uint8_t ev) {
+  if (!alertSound || volVal() == 0) return;
+  M5.Speaker.setVolume(volVal());
+  if (ev & ALERT_EMERGENCY) {                    // 紧急：三声高音
+    M5.Speaker.tone(2637, 110);
+    M5.Speaker.tone(2637, 110, -1, false);
+    M5.Speaker.tone(2637, 110, -1, false);
+  } else {                                       // 进入告警圈：上行两声
+    M5.Speaker.tone(1568, 120);
+    M5.Speaker.tone(2093, 180, -1, false);
+  }
+}
+
+static void alertLedRelease() {
+  if (alertLedOwned) { ledSetOverride(false); alertLedOwned = false; }
+}
+
+static void alertUpdate(uint32_t now) {
+  const bool haveMe = gnssHasFix();
+  const double myLat = haveMe ? gnssLat() : 0, myLon = haveMe ? gnssLng() : 0;
+  uint8_t ev = 0;
+  bool inside = false;
+  const int n = droneCount < 12 ? droneCount : 12;
+  for (int i = 0; i < n; i++) {
+    const Drone& d = drones[i];
+    const bool lost = (now - d.lastMs) > LOST_MS;
+    float distM = -1;
+    if (haveMe && d.r.haveLoc) distM = gcKm(myLat, myLon, d.r.lat, d.r.lon) * 1000.0f;
+    ev |= alertEval(alertSt[i], distM, alertLevel, d.r.haveStatus && d.r.opStatus == 3, lost);
+    if (alertSt[i].inside) inside = true;
+  }
+  alertAnyInside = inside;
+  if (ev) {
+    alertFlashUntilMs = now + 3000;
+    alertLastBeepMs = now;
+    alertBeep(ev);
+  } else if (inside && now - alertLastBeepMs >= 8000) {   // 还在圈内：隔一会儿轻提醒一下
+    alertLastBeepMs = now;
+    if (alertSound && volVal()) { M5.Speaker.setVolume(volVal()); M5.Speaker.tone(1568, 70); }
+  }
+  // 红灯闪：只在没人接管 LED 时才抢，退出时务必还回去
+  if ((int32_t)(now - alertFlashUntilMs) < 0) {
+    if (!alertLedOwned && !ledOverrideActive()) { ledSetOverride(true); alertLedOwned = true; }
+    if (alertLedOwned) { const bool on = (now / 150) % 2 == 0; ledShowRGB(on ? 255 : 0, 0, 0); }
+  } else alertLedRelease();
+}
+
 void ridAppUpdate() {
   if (!running || !drones) return;
   ridStreamPump();
   const uint32_t now = millis();
+  alertUpdate(now);
 
   if (manualLock) return;   // 手动锁频模式保持
 
@@ -526,6 +616,22 @@ void ridAppKey(char k) {
   }
   else if (k == 'r' || k == 'R') {
     droneCount = 0; selIdx = 0; listTop = 0; dirty = true;
+    for (auto& a : alertSt) a = AlertState();
+  }
+  else if (k == 'a' || k == 'A') {
+    alertLevel = (alertLevel + 1) % ALERT_LEVEL_N;
+    saveInt("ridalert", "lvl", alertLevel);
+    for (auto& a : alertSt) a = AlertState();     // 换档后让已在圈内的重新判一次
+    dirty = true;
+  }
+  else if (k == 'b' || k == 'B') {
+    alertSound = !alertSound;
+    saveBool("ridalert", "snd", alertSound);
+    if (alertSound && volVal()) { M5.Speaker.setVolume(volVal()); M5.Speaker.tone(1568, 80); }   // 开的时候响一声确认
+    dirty = true;
+  }
+  else if (k == 'm' || k == 'M') {
+    radarView = !radarView; dirty = true;
   }
   else if (k == 'c' || k == 'C') {
     // 切换手动锁定 / 动态轮询
@@ -554,6 +660,10 @@ static float bearingTo(double lat1, double lon1, double lat2, double lon2) {
 }
 
 // 梯形 4 级信号条
+static int8_t rssiShown(const Drone& d) {
+  return (int8_t)((d.rssiAvgX8 + (d.rssiAvgX8 < 0 ? -4 : 4)) / 8);   // 四舍五入
+}
+
 static void drawRssiBars(int x, int y, int8_t rssi) {
   int level = 0;
   if (rssi >= -65)      level = 4;
@@ -607,6 +717,138 @@ static void drawVendorBadge(int x, int y, const char* vendor) {
   cv.drawString(vendor, x + w / 2, y + h / 2);
 }
 
+// 雷达视图：北向上，我在圆心，圆周 = 当前量程；选中的机体高亮，右侧给出它的读数。
+static void drawAlertSettings(int x, int y) {
+  char b[24];
+  cv.setTextDatum(top_left); cv.setTextSize(1);
+  cv.setTextColor(alertLevel ? TFT_YELLOW : TFT_DARKGREY, TFT_BLACK);
+  if (alertLevel) snprintf(b, sizeof(b), "a ALR %um", (unsigned)ALERT_RANGE_M[alertLevel]);
+  else            snprintf(b, sizeof(b), "a ALR off");
+  cv.drawString(b, x, y);
+  int alrW = cv.textWidth(b);
+  cv.setTextColor(alertSound ? TFT_YELLOW : TFT_DARKGREY, TFT_BLACK);
+  cv.drawString(alertSound ? "b SND on" : "b SND off", x + alrW + 6, y);
+}
+
+static void drawRidRadar(uint32_t now, bool haveMe, double myLat, double myLon) {
+  const int cx = 68, cy = 72, R = 50;
+  if (!haveMe) {
+    cv.setTextDatum(middle_center); cv.setTextSize(1);
+    cv.setTextColor(TFT_YELLOW, TFT_BLACK);
+    cv.drawString("Radar needs a GNSS fix", SW / 2, 54);
+    cv.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    cv.drawString("Switch to list or wait for satellites", SW / 2, 70);
+    drawAlertSettings(SW / 2 - 50, 92);
+
+    cv.setTextDatum(bottom_left);
+    cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("M", 6, SH - 2);
+    cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("list", 14, SH - 2);
+    cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("A", 54, SH - 2);
+    cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("alr", 62, SH - 2);
+    cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("B", 94, SH - 2);
+    cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("snd", 102, SH - 2);
+    cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("`", 136, SH - 2);
+    cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("back", 144, SH - 2);
+    return;
+  }
+  // 量程：能装下所有有位置目标的最小一档
+  float maxD = 0;
+  int noPos = 0;
+  for (int i = 0; i < droneCount; i++) {
+    if (!drones[i].r.haveLoc) { noPos++; continue; }
+    RadarPt q = radarRel(myLat, myLon, drones[i].r.lat, drones[i].r.lon);
+    if (q.distM > maxD) maxD = q.distM;
+  }
+  const float range = radarPickRange(maxD);
+
+  cv.drawCircle(cx, cy, R, 0x2945);
+  cv.drawCircle(cx, cy, R / 2, 0x1082);
+  cv.drawFastHLine(cx - R, cy, 2 * R + 1, 0x1082);
+  cv.drawFastVLine(cx, cy - R, 2 * R + 1, 0x1082);
+  cv.setTextDatum(middle_center); cv.setTextColor(0x8410, TFT_BLACK);
+  cv.drawString("N", cx, cy - R + 6);
+  cv.fillCircle(cx, cy, 2, TFT_WHITE);
+
+  for (int i = 0; i < droneCount; i++) {
+    const Drone& d = drones[i];
+    if (!d.r.haveLoc) continue;
+    const bool lost = (now - d.lastMs) > LOST_MS;
+    const bool sel = (i == selIdx);
+    int dx, dy; bool clipped;
+    radarToPx(radarRel(myLat, myLon, d.r.lat, d.r.lon), range, R, dx, dy, clipped);
+    const int x = cx + dx, y = cy + dy;
+    const uint16_t col = lost ? 0x4208 : sel ? TFT_YELLOW : (d.r.opStatus == 3 ? TFT_RED : ACCENT);
+    if (sel && d.r.haveSys && !lost) {   // 选中机的飞手/起飞点：空心方框
+      int px, py; bool pc;
+      radarToPx(radarRel(myLat, myLon, d.r.pilotLat, d.r.pilotLon), range, R, px, py, pc);
+      cv.drawRect(cx + px - 2, cy + py - 2, 5, 5, TFT_GREEN);
+    }
+    if (d.r.heading >= 0 && !lost) {      // 航向短线
+      const float a = d.r.heading * (float)(M_PI / 180.0);
+      cv.drawLine(x, y, x + (int)lroundf(sinf(a) * 9), y - (int)lroundf(cosf(a) * 9), col);
+    }
+    if (clipped) cv.drawCircle(x, y, 3, col); else cv.fillCircle(x, y, sel ? 3 : 2, col);
+    char num[4]; snprintf(num, sizeof(num), "%d", i + 1);
+    cv.setTextDatum(top_left); cv.setTextColor(col, TFT_BLACK);
+    cv.drawString(num, x + 4, y - 9);
+  }
+
+  // 右侧读数
+  const int px0 = 130;
+  char b[40];
+  cv.setTextDatum(top_left); cv.setTextSize(1);
+  cv.setTextColor(0x8410, TFT_BLACK);
+  if (range >= 1000) snprintf(b, sizeof(b), "RNG %.0fkm", range / 1000);
+  else               snprintf(b, sizeof(b), "RNG %.0fm", range);
+  cv.drawString(b, px0, 18);
+  if (alertAnyInside) {
+    cv.setTextColor(TFT_RED, TFT_BLACK);
+    cv.drawString("!ALERT", px0 + 64, 18);
+  }
+  if (selIdx >= 0 && selIdx < droneCount) {
+    const Drone& d = drones[selIdx];
+    const OdidResult& r = d.r;
+    cv.setTextColor(TFT_YELLOW, TFT_BLACK);
+    snprintf(b, sizeof(b), "#%d %s", selIdx + 1, r.haveBasic ? r.uasId : "(no id)");
+    truncInPlace(b, 16);
+    cv.drawString(b, px0, 31);
+    cv.setTextColor(TFT_WHITE, TFT_BLACK);
+    if (r.haveLoc) {
+      const float km = gcKm(myLat, myLon, r.lat, r.lon);
+      const float br = bearingTo(myLat, myLon, r.lat, r.lon);
+      if (km < 1.0f) snprintf(b, sizeof(b), "%dm %s", (int)(km * 1000), cardOf(br));
+      else           snprintf(b, sizeof(b), "%.1fkm %s", km, cardOf(br));
+    } else snprintf(b, sizeof(b), "no position");
+    cv.drawString(b, px0, 44);
+    cv.setTextColor(0x05E8, TFT_BLACK);
+    int n = 0; b[0] = 0;
+    if (r.haveHeight)   appendf(b, sizeof(b), n, "H %.0fm ", r.height);
+    else if (r.haveAlt) appendf(b, sizeof(b), n, "Alt %.0fm ", r.altGeo);
+    if (r.haveSpeed && r.speed > 0.2f) appendf(b, sizeof(b), n, "%.1fm/s", r.speed);
+    cv.drawString(b, px0, 57);
+    if (r.heading >= 0) { snprintf(b, sizeof(b), "HDG %d", r.heading); cv.drawString(b, px0, 70); }
+    snprintf(b, sizeof(b), "%ddB", rssiShown(d));
+    cv.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+    cv.drawString(b, px0, 83);
+    drawRssiBars(px0 + 38, 83, rssiShown(d));
+  }
+  cv.setTextColor(TFT_DARKGREY, TFT_BLACK);
+  if (noPos) { snprintf(b, sizeof(b), "%d w/o pos", noPos); cv.drawString(b, px0, 96); }
+  drawAlertSettings(px0, 109);
+
+  // 底部快捷键提示
+  cv.setTextDatum(bottom_left); cv.setTextSize(1);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("M", 6, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("list", 14, SH - 2);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString(";", 46, SH - 2);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString(".", 53, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("sel", 61, SH - 2);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("Ent", 89, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("info", 109, SH - 2);
+  cv.setTextColor(0x07FF, TFT_BLACK); cv.drawString("`", 141, SH - 2);
+  cv.setTextColor(0x8410, TFT_BLACK); cv.drawString("back", 148, SH - 2);
+}
+
 void drawRidApp() {
   cv.fillScreen(TFT_BLACK);
   const uint32_t now = millis();
@@ -631,7 +873,20 @@ void drawRidApp() {
       cv.fillCircle(SW - tw - 12, 6, 2, TFT_RED);
     }
   } else {
-    drawPageHeader(anyFake ? "Drone ID [SIM]" : "Drone ID", chanStr, (manualLock || lockChan) ? ACCENT : 0);
+    if (alertAnyInside) {
+      drawPageHeader(anyFake ? "RID [SIM]" : "Drone ID", chanStr, (manualLock || lockChan) ? ACCENT : 0);
+      const int rtw = cv.textWidth(chanStr);
+      const int bw = 38, bh = 10;
+      const int bx = SW - 6 - rtw - bw - 4;
+      const bool blink = ((now / 400) % 2) == 0;
+      const uint16_t bBg = blink ? TFT_RED : 0x8800;
+      cv.fillRoundRect(bx, 2, bw, bh, 2, bBg);
+      cv.setTextDatum(middle_center); cv.setTextSize(1);
+      cv.setTextColor(TFT_WHITE, bBg);
+      cv.drawString("ALERT", bx + bw / 2, 2 + bh / 2);
+    } else {
+      drawPageHeader(anyFake ? "Drone ID [SIM]" : "Drone ID", chanStr, (manualLock || lockChan) ? ACCENT : 0);
+    }
   }
 
   if (droneCount == 0 || !drones) {
@@ -663,6 +918,12 @@ void drawRidApp() {
 
   const bool haveMe = gnssHasFix();
   const double myLat = haveMe ? gnssLat() : 0, myLon = haveMe ? gnssLng() : 0;
+
+  if (radarView) {
+    drawRidRadar(now, haveMe, myLat, myLon);
+    drawSdToast(now);
+    return;
+  }
 
   const int startY = 16;
   const int rowH = 34, cardH = 31, VIS = 3;
@@ -717,8 +978,8 @@ void drawRidApp() {
     cv.setTextColor(sel ? ACCENT : 0x05E8, cardBg);
     cv.drawString(sub, 7, y + 18);
 
-    drawRssiBars(SW - 49, y + 18, d.rssi);
-    char rssiStr[10]; snprintf(rssiStr, sizeof(rssiStr), "%ddB", d.rssi);
+    drawRssiBars(SW - 49, y + 18, rssiShown(d));
+    char rssiStr[10]; snprintf(rssiStr, sizeof(rssiStr), "%ddB", rssiShown(d));
     cv.setTextDatum(top_right);
     cv.setTextColor(sel ? TFT_WHITE : TFT_DARKGREY, cardBg);
     cv.drawString(rssiStr, SW - 6, y + 18);
@@ -726,7 +987,7 @@ void drawRidApp() {
 
   cv.setTextDatum(bottom_left); cv.setTextSize(1);
   cv.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  cv.drawString("Enter info  S rec  C lock  ` back", 4, SH - 2);
+  cv.drawString("Ent info M radar S rec C lock ` back", 4, SH - 2);
   drawSdToast(now);
 }
 
@@ -741,7 +1002,7 @@ void drawRidAppDetail() {
   char hdr[32];
   if (isRecording) {
     const bool blink = (now / 500) % 2 == 0;
-    snprintf(hdr, sizeof(hdr), "%ddB REC %lup", d.rssi, (unsigned long)recPackets);
+    snprintf(hdr, sizeof(hdr), "%ddB REC %lup", rssiShown(d), (unsigned long)recPackets);
     drawPageHeader(d.injected ? "Drone (DEMO)" : (r.isGb ? "Drone GB 42590" : "Drone ASTM"),
                    hdr, blink ? TFT_RED : 0x8800);
     if (blink) {
@@ -749,7 +1010,7 @@ void drawRidAppDetail() {
       cv.fillCircle(SW - tw - 12, 6, 2, TFT_RED);
     }
   } else {
-    snprintf(hdr, sizeof(hdr), "%ddBm  ch%u", d.rssi, d.chan);
+    snprintf(hdr, sizeof(hdr), "%ddBm  ch%u", rssiShown(d), d.chan);
     drawPageHeader(d.injected ? "Drone (DEMO)" : (r.isGb ? "Drone GB 42590" : "Drone ASTM"),
                    hdr, d.injected ? TFT_MAGENTA : 0);
   }
@@ -811,10 +1072,27 @@ void drawRidAppDetail() {
   cv.fillRoundRect(3, 71, SW - 6, 50, 3, 0x0841);
   cv.drawRoundRect(3, 71, SW - 6, 50, 3, 0x18C3);
 
-  snprintf(b, sizeof(b), "Reg : %s  Std: %s",
-           r.haveOperatorId ? r.operatorId : "--",
-           r.isGb ? (r.gbVersion ? "GB V2.0" : "GB 42590") : "ASTM F3411");
-  cv.drawString(b, 7, 74);
+  {
+    const OpIdState op = droneOpId(d, now);
+    const char* stdName = r.isGb ? (r.gbVersion ? "GB V2.0" : "GB 42590") : "ASTM F3411";
+    cv.setTextDatum(top_right);
+    cv.setTextColor(TFT_LIGHTGREY, 0x0841);
+    cv.drawString(stdName, SW - 7, 74);
+    cv.setTextDatum(top_left);
+    if (op == OPID_NONE) {                 // 观察够久仍没播：橙色提示
+      cv.setTextColor(TFT_ORANGE, 0x0841);
+      snprintf(b, sizeof(b), "Reg : not broadcast");
+    } else if (op == OPID_SUSPECT) {       // 播了但像占位符：黄色，值后加问号
+      cv.setTextColor(TFT_YELLOW, 0x0841);
+      snprintf(b, sizeof(b), "Reg : %s ?", r.operatorId);
+    } else {
+      cv.setTextColor(TFT_LIGHTGREY, 0x0841);
+      snprintf(b, sizeof(b), "Reg : %s", r.haveOperatorId ? r.operatorId : "--");
+    }
+    truncInPlace(b, 22);
+    cv.drawString(b, 7, 74);
+    cv.setTextColor(TFT_LIGHTGREY, 0x0841);
+  }
 
   if (r.haveSys) snprintf(b, sizeof(b), "Pilot: %.6f, %.6f", r.pilotLat, r.pilotLon);
   else           snprintf(b, sizeof(b), "Pilot: no remote station pos");
@@ -824,7 +1102,7 @@ void drawRidAppDetail() {
   cv.drawString("State:", 7, 96);
   drawStatusBadge(44, 96, r, lost, d.injected);
 
-  drawRssiBars(SW - 88, 97, d.rssi);
+  drawRssiBars(SW - 88, 97, rssiShown(d));
   snprintf(b, sizeof(b), "%lupkts  %lus", (unsigned long)d.packets, (unsigned long)((now - d.lastMs) / 1000));
   cv.setTextDatum(top_right);
   cv.setTextColor(TFT_DARKGREY, 0x0841);
@@ -833,6 +1111,12 @@ void drawRidAppDetail() {
   cv.setTextDatum(top_left);
   if (r.haveSelfId) {
     snprintf(b, sizeof(b), "Desc: %s", r.selfId);
+  } else if (r.haveAuth) {
+    // 已收页数 / 总页数（页 0 没收到时总数未知）
+    const int got = __builtin_popcount(r.authPages);
+    if (r.authHavePage0) snprintf(b, sizeof(b), "Auth: %s %d/%d  %uB", odidAuthTypeName(r.authType),
+                                  got, r.authLastPage + 1, (unsigned)r.authLen);
+    else                 snprintf(b, sizeof(b), "Auth: %s %d/?", odidAuthTypeName(r.authType), got);
   } else if (r.haveUaClass) {
     snprintf(b, sizeof(b), "Class: %s  Coord: %s", gbClassName(r.uaClass), gbCoordSysName(r.coordSys));
   } else {

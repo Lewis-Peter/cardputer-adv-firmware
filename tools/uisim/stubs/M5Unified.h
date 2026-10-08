@@ -25,7 +25,7 @@ class SimSpeaker {
 public:
   void begin() {}
   void end() {}
-  void tone(uint16_t, int) {}
+  void tone(uint16_t, int, int = -1, bool = true) {}
   void stop() {}
   void setVolume(uint8_t) {}
 };

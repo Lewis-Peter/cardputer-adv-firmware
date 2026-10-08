@@ -572,6 +572,7 @@ static void handleSerialCmd(const String& raw) {
         case SCREEN_SSH:      sshEnter(); break;
         case SCREEN_WSNIFF:   wsniffEnter(); break;
         case SCREEN_WARDRIVE: wardriveEnter(); break;
+        case SCREEN_RID:      ridAppEnter(); break;   // 开混杂模式；不调的话页面是空壳，收不到任何包
         case SCREEN_ASTRO_SUN:
         case SCREEN_MOON:
         case SCREEN_ASTRO_TERM: astroEnter(); break;

@@ -4,7 +4,7 @@
 
 > **Open Source Edition Note**: This is a sanitized public release (with fresh commit history). Before use, run `cp src/secrets.h.example src/secrets.h` and fill in your own API keys.
 > Personal configurations such as SSH / VPN probe targets are configured directly on the device (stored in NVS), defaulting to empty or documentation-reserved addresses (203.0.113.10).
-> Compile-time defaults (NTP servers, hotspot SSID/default password, network probe targets) are located in `src/config.h`; copy `src/config_local.h.example` to `src/config_local.h` to override macros.
+> Compile-time defaults (NTP servers, hotspot SSID/default password, network probe targets, first-run SSH defaults) are located in `src/config.h`; copy `src/config_local.h.example` to `src/config_local.h` to override macros.
 > Radio presets: edit `CFG_RADIO_PRESETS`, or place `/radio.txt` in the SD card root (one entry per line: `Name|http://direct_url|Genre`, `#` for comments, up to 12 presets, without recompiling).
 > Online map tile sources: `CFG_MAP_TILE_URL` (placeholders `{s}{x}{y}{z}`), `CFG_MAP_TILE_SUBS`, `CFG_MAP_TILE_WGS84` (coordinate system).
 > `cardputer-bridge` mentioned in documentation is a companion tool, not yet public. License: MIT (`lib/` and `sha512_crypt.*` are third-party code and retain their original licenses).

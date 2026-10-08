@@ -1433,7 +1433,9 @@ void loop() {
   }
 
   if (dirty && !screenOff) { render(); dirty = false; }
-  // IMU 或 LoRa 嗅探流开着时不能按 20ms 一帧跑：挂在主循环上，快速轮询中断标志以便在收包后立刻重新武装接收。
+  // 高频流开启时（IMU 50-100Hz / LoRa 嗅探 / BLE 广播流 / RID 无人机嗅探）：2ms 极速轮询，避免队列积压与丢包。
   // 流只在插着电脑时用，功耗无所谓；其它时候照旧 20ms 省电。
-  delay(menuAnim ? 8 : ((imuStreamIsActive() || loraSniffIsActive()) ? 2 : 20));
+  const bool highRateStream = imuStreamIsActive() || loraSniffIsActive() ||
+                              btStreamIsActive() || ridStreamIsActive();
+  delay(menuAnim ? 8 : (highRateStream ? 2 : 20));
 }

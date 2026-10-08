@@ -1566,7 +1566,8 @@ static void btsGapCb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param
   if (event != ESP_GAP_BLE_EXT_ADV_REPORT_EVT) return;
   const esp_ble_gap_ext_adv_reprot_t& r = param->ext_adv_report.params;
   btsPkts = btsPkts + 1;
-  if (!btsQ) return;
+  QueueHandle_t q = btsQ;
+  if (!q || !btsOn) return;
   BtRawAdv a;
   memcpy(a.addr, r.addr, 6);
   a.atype = (uint8_t)r.addr_type;
@@ -1574,7 +1575,7 @@ static void btsGapCb(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* param
   a.phy = (uint8_t)r.primary_phy;
   a.len = r.adv_data_len > sizeof(a.data) ? sizeof(a.data) : r.adv_data_len;
   memcpy(a.data, r.adv_data, a.len);
-  if (xQueueSend(btsQ, &a, 0) != pdTRUE) btsDrop = btsDrop + 1;
+  if (xQueueSend(q, &a, 0) != pdTRUE) btsDrop = btsDrop + 1;
 }
 
 // 一条广播里我们关心的 AD 字段
@@ -1777,8 +1778,10 @@ void btStreamStop() {
     btsOn = false;   // 回调先看到这个就不再入队
     esp_ble_gap_stop_ext_scan();
     BLEDevice::setCustomGapHandler(nullptr);
-    vTaskDelay(pdMS_TO_TICKS(30));   // 等在途回调退场再释放队列
-    if (btsQ) { vQueueDelete(btsQ); btsQ = nullptr; }
+    vTaskDelay(pdMS_TO_TICKS(50));   // 等在途回调退场再释放队列
+    QueueHandle_t q = btsQ;
+    btsQ = nullptr;
+    if (q) { vQueueDelete(q); }
     if (btsTab) {
       for (int i = 0; i < BTS_MAX; i++) if (btsTab[i].od) delete btsTab[i].od;
       free(btsTab); btsTab = nullptr;

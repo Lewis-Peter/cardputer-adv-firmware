@@ -51,6 +51,16 @@ struct OdidResult {
   char selfId[24] = {0};     // 运行描述（23 字节 ASCII），飞手自己填的一句话
   uint8_t selfIdType = 0;
 
+  // Authentication（类型 2）：分页的签名/证明数据，一帧只带一页，页 0 带总页数、总长度和时间。
+  // 签名字节本身不存（每机最多 362 字节，ESP32 上不值得），只留摘要，够看"发没发、发到哪了"。
+  bool     haveAuth = false;
+  uint8_t  authType = 0;        // 1 UAS ID 签名 / 2 运营人 ID 签名 / 3 消息集签名 / 4 网络 RID / 5 专用方法 / 0xA~0xF 私有
+  uint16_t authPages = 0;       // 已收到的页（位 n = 第 n 页）
+  bool     authHavePage0 = false;
+  uint8_t  authLastPage = 0;    // 页 0 里声明的最后一页序号（总页数 = 它 + 1）
+  uint8_t  authLen = 0;         // 页 0 里声明的签名总字节数
+  uint32_t authTime = 0;        // 页 0 里的时间戳（2019-01-01 起的秒数）
+
   bool haveOperatorId = false;
   char operatorId[21] = {0}; // 运营人编号 / 国标的实名登记号（20 字节 ASCII）
 
@@ -129,3 +139,5 @@ const char* odidPilotLocName(uint8_t t);
 const char* gbStatusName(uint8_t t);
 const char* gbCoordSysName(uint8_t t);
 const char* gbClassName(uint8_t t);
+
+const char* odidAuthTypeName(uint8_t type);   // Auth 类型的短名字

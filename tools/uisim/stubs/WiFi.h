@@ -7,9 +7,13 @@ public:
   int status() { return status_; }
   void setStatus(int s) { status_ = s; }
   void disconnect() { status_ = 0; }
+  void disconnect(bool) { status_ = 0; }
   void reconnect() { status_ = WL_CONNECTED; }
+  void mode(int) {}
   int8_t RSSI() { return -55; }
 };
+#define WIFI_STA 1
+#define WIFI_OFF 0
 extern SimWiFi WiFi;
 class WiFiClient : public Stream {
   String data_;

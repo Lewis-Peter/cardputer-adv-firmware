@@ -6,6 +6,7 @@
 static const int MSG_SIZE = 25;
 static const uint8_t MSG_BASIC_ID   = 0x0;
 static const uint8_t MSG_LOCATION   = 0x1;
+static const uint8_t MSG_AUTH       = 0x2;
 static const uint8_t MSG_SELF_ID    = 0x3;
 static const uint8_t MSG_SYSTEM     = 0x4;
 static const uint8_t MSG_OPERATOR_ID = 0x5;
@@ -57,14 +58,17 @@ static bool decodeBasicId(const uint8_t* m, OdidResult& out) {
 }
 
 static bool decodeLocation(const uint8_t* m, OdidResult& out) {
-  int32_t latRaw = rd32(m + 5), lonRaw = rd32(m + 9);
-  if (coordRawBad(latRaw) || coordRawBad(lonRaw)) return false;
-  double lat = latRaw * 1e-7, lon = lonRaw * 1e-7;
-  if (!coordPairOk(lat, lon)) return false;
-  out.lat = lat; out.lon = lon;
+  // 坐标无效（没 GPS 定位，经纬度全 0）不等于其余字段无效：实测 DJI Air 3 室内开机，
+  // 状态=地面、气压高=-38m、速度=0 都是真值。所以先把坐标有效与否记下来，
+  // 其余字段照常解析，最后返回值只看坐标——"这帧算不算解出来了"的判据跟以前一致。
+  const int32_t latRaw = rd32(m + 5), lonRaw = rd32(m + 9);
+  const double lat = latRaw * 1e-7, lon = lonRaw * 1e-7;
+  const bool coordsOk = !coordRawBad(latRaw) && !coordRawBad(lonRaw) && coordPairOk(lat, lon);
+  if (coordsOk) { out.lat = lat; out.lon = lon; }
 
   // byte1: bit0=速度倍率 bit1=东西向 bit2=高度类型 bit4~7=飞行状态
   const uint8_t b1 = m[1];
+  if ((b1 >> 4) <= 5) { out.opStatus = (uint8_t)(b1 >> 4); out.haveStatus = true; }
 
   // 航向：byte2 存 0~179，加上 bit1 的东西向标志才凑出整圈 0~359。
   // （上游那个 Python 实现直接把航向丢了，这里补上——判断无人机往哪飞比速度更有用）
@@ -76,10 +80,6 @@ static bool decodeLocation(const uint8_t* m, OdidResult& out) {
   if (sp < 255.0f) { out.speed = sp; out.haveSpeed = true; }
 
   out.vspeed = (float)((int8_t)m[4]) * 0.5f;
-
-  // byte1 高 4 位是运行状态，跟国标数据项 015 同义，共用 opStatus。
-  // 跟国标那边一样**不拿它当"解出来了"的证据**——这个函数靠经纬度过关，状态只是搭车。
-  if ((b1 >> 4) <= 5) { out.opStatus = (uint8_t)(b1 >> 4); out.haveStatus = true; }
 
   // 高度：uint16 半米一格、偏移 -1000。等于 -1000 是"没有这个值"的哨兵。
   float altBaro = rd16(m + 13) * 0.5f - 1000.0f;
@@ -104,8 +104,38 @@ static bool decodeLocation(const uint8_t* m, OdidResult& out) {
   uint16_t ts = rd16(m + 21);
   if (ts != 0xFFFF && ts <= 36000) { out.astmTimeSec = ts * 0.1f; out.haveAstmTime = true; }
 
-  out.haveLoc = true;
+  if (coordsOk) out.haveLoc = true;
+  return coordsOk;
+}
+
+// Authentication：byte1 = 认证类型(高4位) | 页号(低4位)。页 0：byte2=最后一页序号、
+// byte3=签名总长、byte4~7=时间戳(LE)、byte8~24 起 17 字节数据；其余页 byte2~24 共 23 字节数据。
+// 类型 0 是"没有认证"，6~9 是保留值——都不当成 Auth 处理。
+static bool decodeAuth(const uint8_t* m, OdidResult& out) {
+  const uint8_t type = m[1] >> 4, page = m[1] & 0x0F;
+  if (type == 0 || (type >= 6 && type <= 9)) return false;
+  if (page == 0 && m[2] > 15) return false;             // 最多 16 页
+  out.haveAuth = true;
+  out.authType = type;
+  out.authPages |= (uint16_t)(1u << page);
+  if (page == 0) {
+    out.authHavePage0 = true;
+    out.authLastPage = m[2];
+    out.authLen = m[3];
+    out.authTime = (uint32_t)rd32(m + 4);
+  }
   return true;
+}
+
+const char* odidAuthTypeName(uint8_t t) {
+  switch (t) {
+    case 1: return "UAS-ID sig";
+    case 2: return "Operator sig";
+    case 3: return "MsgSet sig";
+    case 4: return "Network RID";
+    case 5: return "Spec method";
+    default: return t >= 0xA ? "Private" : "?";
+  }
 }
 
 static bool decodeSelfId(const uint8_t* m, OdidResult& out) {
@@ -149,10 +179,11 @@ static bool decodeAt(const uint8_t* p, int len, OdidResult& out) {
       switch (m[0] >> 4) {
         case MSG_BASIC_ID:   if (!out.haveBasic)      any |= decodeBasicId(m, out); break;
         case MSG_LOCATION:   if (!out.haveLoc)        any |= decodeLocation(m, out); break;
+        case MSG_AUTH:       any |= decodeAuth(m, out); break;   // 一包里可以带多页，不加"已有"判断
         case MSG_SELF_ID:    if (!out.haveSelfId)     any |= decodeSelfId(m, out); break;
         case MSG_SYSTEM:     if (!out.haveSys)        any |= decodeSystem(m, out); break;
         case MSG_OPERATOR_ID:if (!out.haveOperatorId) any |= decodeOperatorId(m, out); break;
-        default: break;   // 类型 2 是 Auth，分页签名，看无人机用不上
+        default: break;
       }
     }
     return any;
@@ -162,6 +193,7 @@ static bool decodeAt(const uint8_t* p, int len, OdidResult& out) {
   switch (type) {
     case MSG_BASIC_ID:    return decodeBasicId(p, out);
     case MSG_LOCATION:    return decodeLocation(p, out);
+    case MSG_AUTH:        return decodeAuth(p, out);
     case MSG_SELF_ID:     return decodeSelfId(p, out);
     case MSG_SYSTEM:      return decodeSystem(p, out);
     case MSG_OPERATOR_ID: return decodeOperatorId(p, out);
@@ -462,6 +494,19 @@ void odidMerge(OdidResult& dst, const OdidResult& src) {
   if (src.haveSys) {
     dst.haveSys = true; dst.pilotLat = src.pilotLat; dst.pilotLon = src.pilotLon;
     dst.pilotLocType = src.pilotLocType;
+  }
+  if (src.haveAuth) {
+    // 换了认证类型、或页 0 的时间戳变了，说明是新一轮签名：旧的页位图作废，不然会把两轮的页混成"收齐了"
+    if (!dst.haveAuth || dst.authType != src.authType ||
+        (src.authHavePage0 && dst.authHavePage0 && src.authTime != dst.authTime)) {
+      dst.authPages = 0; dst.authHavePage0 = false;
+    }
+    dst.haveAuth = true; dst.authType = src.authType;
+    dst.authPages |= src.authPages;
+    if (src.authHavePage0) {
+      dst.authHavePage0 = true; dst.authLastPage = src.authLastPage;
+      dst.authLen = src.authLen; dst.authTime = src.authTime;
+    }
   }
   if (src.haveSelfId && !dst.haveSelfId) {
     dst.haveSelfId = true; dst.selfIdType = src.selfIdType;
